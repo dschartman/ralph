@@ -10,8 +10,11 @@ git clone https://github.com/dschartman/ralph.git
 cd ralph
 uv sync
 
-# Run Ralph in a project with a Ralphfile
-uv run ralph
+# Run tests
+uv run pytest tests/ -v
+
+# Install as a tool (recommended)
+uv tool install --editable .
 ```
 
 ## What is Ralph?
@@ -60,18 +63,18 @@ Each agent runs as a fresh Claude session with its own tools and responsibilitie
 ### Core Commands
 
 ```bash
-uv run ralph              # Run Ralph (requires Ralphfile in current directory)
-uv run ralph status       # Show current run status
-uv run ralph history      # Show past runs
-uv run ralph input "msg"  # Add human input for next iteration
-uv run ralph pause        # Pause current run gracefully
-uv run ralph resume       # Resume a paused run
-uv run ralph abort        # Abort current run
+ralph run                 # Run Ralph (requires Ralphfile in current directory)
+ralph status              # Show current run status
+ralph history             # Show past runs
+ralph input "msg"         # Add human input for next iteration
+ralph pause               # Pause current run gracefully
+ralph resume              # Resume a paused run
+ralph abort               # Abort current run
 ```
 
 ### Trace Commands (Task Management)
 
-Ralph uses [Trace](https://github.com/trevorklee/trace) for task management:
+Ralph uses [Trace](https://github.com/dschartman/trace) for task management:
 
 ```bash
 trc ready                              # Show unblocked tasks
@@ -88,7 +91,7 @@ trc close <id>                         # Mark task complete
 - Python 3.13+
 - [uv](https://github.com/astral-sh/uv) (Python package manager)
 - Git repository (Ralph requires git)
-- [Trace CLI](https://github.com/trevorklee/trace) (`trc` command)
+- [Trace CLI](https://github.com/dschartman/trace) (`trc` command)
 
 ### Setup
 
@@ -98,7 +101,9 @@ cd ralph
 uv sync
 ```
 
-Or install as a tool:
+### Recommended: Install as a Tool
+
+Installing as a tool allows Ralph to be run in any directory:
 
 ```bash
 uv tool install --editable .
@@ -106,6 +111,8 @@ ralph  # Now available globally
 ```
 
 ## The Ralphfile
+
+> **Note:** The Ralphfile approach is experimental and may change in favor of using Trace for spec management.
 
 A Ralphfile is a specification that Ralph tries to satisfy. Place it in your project root:
 
