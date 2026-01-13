@@ -28,6 +28,8 @@ The name comes from Ralph Wiggum—a character who exists entirely in the presen
 
 Ralph (the tool) embraces this reality instead of fighting it. It provides external scaffolding for the executive functions the model cannot provide internally.
 
+For the full conceptual framework, see [THEORY.md](THEORY.md).
+
 ## Architecture
 
 Ralph uses a **multi-agent architecture** with three distinct agents per iteration:
