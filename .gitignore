@@ -1,0 +1,6 @@
+# Project-specific Ralph ID (state stored in ~/.ralph/)
+.ralph-id
+
+# Python
+__pycache__/
+*.pyc

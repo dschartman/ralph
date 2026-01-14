@@ -1,0 +1,1 @@
+{"id": "ralph-an982u", "title": "Make hello.py executable", "description": "Add shebang line and chmod +x to make the script directly executable. Verifier identified this gap in acceptance criteria.", "status": "open", "priority": 2, "created_at": "2026-01-13T03:28:29.695533Z", "updated_at": "2026-01-13T03:28:29.695533Z", "closed_at": null, "dependencies": [], "comments": []}

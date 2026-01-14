@@ -1,0 +1,311 @@
+"""SQLite database operations for Ralph state management."""
+
+import sqlite3
+from pathlib import Path
+from typing import Optional, List
+from datetime import datetime
+import json
+
+from .models import Run, Iteration, AgentOutput, HumanInput
+
+
+class RalphDB:
+    """Manages SQLite database for Ralph state."""
+
+    def __init__(self, db_path: str):
+        """
+        Initialize database connection and ensure schema exists.
+
+        Args:
+            db_path: Path to the SQLite database file
+        """
+        self.db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self):
+        """Create database schema if it doesn't exist."""
+        cursor = self.conn.cursor()
+
+        # Runs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                spec_path TEXT NOT NULL,
+                spec_content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                config TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT
+            )
+        """)
+
+        # Iterations table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS iterations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                number INTEGER NOT NULL,
+                intent TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            )
+        """)
+
+        # Agent outputs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_outputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                iteration_id INTEGER NOT NULL,
+                agent_type TEXT NOT NULL,
+                raw_output_path TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                FOREIGN KEY (iteration_id) REFERENCES iterations(id)
+            )
+        """)
+
+        # Human inputs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS human_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                input_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consumed_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            )
+        """)
+
+        self.conn.commit()
+
+    def create_run(self, run: Run) -> Run:
+        """Create a new run."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO runs (id, spec_path, spec_content, status, config, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            run.id,
+            run.spec_path,
+            run.spec_content,
+            run.status,
+            json.dumps(run.config),
+            run.started_at.isoformat(),
+            run.ended_at.isoformat() if run.ended_at else None
+        ))
+        self.conn.commit()
+        return run
+
+    def get_run(self, run_id: str) -> Optional[Run]:
+        """Get a run by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
+        row = cursor.fetchone()
+        if row:
+            return Run(
+                id=row["id"],
+                spec_path=row["spec_path"],
+                spec_content=row["spec_content"],
+                status=row["status"],
+                config=json.loads(row["config"]),
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            )
+        return None
+
+    def update_run_status(self, run_id: str, status: str, ended_at: Optional[datetime] = None):
+        """Update run status."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE runs
+            SET status = ?, ended_at = ?
+            WHERE id = ?
+        """, (status, ended_at.isoformat() if ended_at else None, run_id))
+        self.conn.commit()
+
+    def get_latest_run(self) -> Optional[Run]:
+        """Get the most recent run."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1")
+        row = cursor.fetchone()
+        if row:
+            return Run(
+                id=row["id"],
+                spec_path=row["spec_path"],
+                spec_content=row["spec_content"],
+                status=row["status"],
+                config=json.loads(row["config"]),
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            )
+        return None
+
+    def list_runs(self) -> List[Run]:
+        """List all runs."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM runs ORDER BY started_at DESC")
+        rows = cursor.fetchall()
+        return [
+            Run(
+                id=row["id"],
+                spec_path=row["spec_path"],
+                spec_content=row["spec_content"],
+                status=row["status"],
+                config=json.loads(row["config"]),
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            )
+            for row in rows
+        ]
+
+    def create_iteration(self, iteration: Iteration) -> Iteration:
+        """Create a new iteration."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO iterations (run_id, number, intent, outcome, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            iteration.run_id,
+            iteration.number,
+            iteration.intent,
+            iteration.outcome,
+            iteration.started_at.isoformat(),
+            iteration.ended_at.isoformat() if iteration.ended_at else None
+        ))
+        self.conn.commit()
+        iteration.id = cursor.lastrowid
+        return iteration
+
+    def get_iteration(self, iteration_id: int) -> Optional[Iteration]:
+        """Get an iteration by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM iterations WHERE id = ?", (iteration_id,))
+        row = cursor.fetchone()
+        if row:
+            return Iteration(
+                id=row["id"],
+                run_id=row["run_id"],
+                number=row["number"],
+                intent=row["intent"],
+                outcome=row["outcome"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            )
+        return None
+
+    def update_iteration(self, iteration_id: int, outcome: str, ended_at: datetime):
+        """Update iteration outcome and end time."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE iterations
+            SET outcome = ?, ended_at = ?
+            WHERE id = ?
+        """, (outcome, ended_at.isoformat(), iteration_id))
+        self.conn.commit()
+
+    def list_iterations(self, run_id: str) -> List[Iteration]:
+        """List all iterations for a run."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM iterations WHERE run_id = ? ORDER BY number", (run_id,))
+        rows = cursor.fetchall()
+        return [
+            Iteration(
+                id=row["id"],
+                run_id=row["run_id"],
+                number=row["number"],
+                intent=row["intent"],
+                outcome=row["outcome"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            )
+            for row in rows
+        ]
+
+    def create_agent_output(self, output: AgentOutput) -> AgentOutput:
+        """Create a new agent output."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO agent_outputs (iteration_id, agent_type, raw_output_path, summary)
+            VALUES (?, ?, ?, ?)
+        """, (
+            output.iteration_id,
+            output.agent_type,
+            output.raw_output_path,
+            output.summary
+        ))
+        self.conn.commit()
+        output.id = cursor.lastrowid
+        return output
+
+    def get_agent_outputs(self, iteration_id: int) -> List[AgentOutput]:
+        """Get all agent outputs for an iteration."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM agent_outputs WHERE iteration_id = ?", (iteration_id,))
+        rows = cursor.fetchall()
+        return [
+            AgentOutput(
+                id=row["id"],
+                iteration_id=row["iteration_id"],
+                agent_type=row["agent_type"],
+                raw_output_path=row["raw_output_path"],
+                summary=row["summary"]
+            )
+            for row in rows
+        ]
+
+    def create_human_input(self, human_input: HumanInput) -> HumanInput:
+        """Create a new human input."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO human_inputs (run_id, input_type, content, created_at, consumed_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            human_input.run_id,
+            human_input.input_type,
+            human_input.content,
+            human_input.created_at.isoformat(),
+            human_input.consumed_at.isoformat() if human_input.consumed_at else None
+        ))
+        self.conn.commit()
+        human_input.id = cursor.lastrowid
+        return human_input
+
+    def get_unconsumed_inputs(self, run_id: str) -> List[HumanInput]:
+        """Get all unconsumed human inputs for a run."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM human_inputs
+            WHERE run_id = ? AND consumed_at IS NULL
+            ORDER BY created_at
+        """, (run_id,))
+        rows = cursor.fetchall()
+        return [
+            HumanInput(
+                id=row["id"],
+                run_id=row["run_id"],
+                input_type=row["input_type"],
+                content=row["content"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                consumed_at=datetime.fromisoformat(row["consumed_at"]) if row["consumed_at"] else None
+            )
+            for row in rows
+        ]
+
+    def mark_input_consumed(self, input_id: int, consumed_at: datetime):
+        """Mark a human input as consumed."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE human_inputs
+            SET consumed_at = ?
+            WHERE id = ?
+        """, (consumed_at.isoformat(), input_id))
+        self.conn.commit()
+
+    def close(self):
+        """Close database connection."""
+        self.conn.close()
