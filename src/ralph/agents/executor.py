@@ -72,14 +72,37 @@ Use these commands via Bash to work with tasks:
 - Be specific about what you did and what you learned
 - Always include `--source executor` when commenting
 
+## Recognizing Verification Boundaries
+
+Some work can be verified with tests you write (infrastructure/capability).
+Some work requires real external systems to verify (behavior).
+
+**Infrastructure work** (you can fully verify):
+- API clients, data models, configuration loading
+- Test with mocks—proves the plumbing works
+
+**Behavioral work** (requires real systems to verify):
+- Agent decision-making, classification accuracy
+- LLM judgment calls, response quality
+- These need real API credentials and test environments
+
+When you complete infrastructure but cannot verify behavior:
+- Report Status: **Blocked** (not Completed)
+- Document exactly what resources are needed for behavioral verification
+- This is correct and expected—not a failure
+
+Example: "Infrastructure complete. Behavioral verification requires ANTHROPIC_API_KEY
+and test Slack workspace. Tests written but skipped until credentials provided."
+
 ## Valid Exit Conditions
 
 You should stop when ANY of these is true:
-- **Completed**: You finished the assigned work
-- **Blocked**: You can't proceed (missing dependency, unclear requirement, etc.)
+- **Completed**: You finished the assigned work AND it can be verified with available resources
+- **Blocked**: You can't proceed—missing dependency, unclear requirement, OR behavioral verification needs external resources
 - **Uncertain**: You're not sure if your approach is correct and need guidance
 
 All three are valid and useful outcomes. Don't force completion.
+Blocked for external dependencies is expected and correct—document what's needed.
 
 ## Output Format
 
