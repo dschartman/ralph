@@ -113,18 +113,20 @@ class Ralph2Runner:
             )
 
             # Extract work item ID from output
-            # Expected format: "Created <id>: <title>"
+            # Expected format: "Created <id>: <title>" (possibly with other lines before)
             output = result.stdout.strip()
-            if output.startswith("Created "):
+            # Get the last line which should contain "Created <id>: <title>"
+            last_line = output.split('\n')[-1].strip()
+            if last_line.startswith("Created "):
                 # Extract the ID between "Created " and ":"
-                work_item_id = output.split()[1].rstrip(":")
+                work_item_id = last_line.split()[1].rstrip(":")
             else:
-                # Fallback: try to extract ID-like pattern
-                match = re.search(r'(\w+-\w+)', output)
+                # Fallback: try to extract ID-like pattern from last line
+                match = re.search(r'(\w+-\w+)', last_line)
                 if match:
                     work_item_id = match.group(1)
                 else:
-                    raise RuntimeError(f"Could not extract work item ID from output: {output}")
+                    raise RuntimeError(f"Could not extract work item ID from output: {last_line}")
 
             # Verify it looks like a valid work item ID (format: word-word)
             if not re.match(r'\w+-\w+', work_item_id):

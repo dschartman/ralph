@@ -220,7 +220,9 @@ async def test_full_integration_flow(test_repo, project_context):
          patch('ralph2.runner.run_verifier', side_effect=mock_verifier), \
          patch('ralph2.runner.run_specialist', side_effect=mock_specialist):
 
-        runner = Ralph2Runner(spec_path, project_context, root_work_item_id=root_work_item_id)
+        # Wait for mock_planner to create root_work_item_id in first call
+        # Then pass it to runner - simulates the flow where planner creates it first
+        runner = Ralph2Runner(spec_path, project_context, root_work_item_id=None)
         status = await runner.run(max_iterations=5)
         runner.close()
 
