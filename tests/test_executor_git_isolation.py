@@ -29,25 +29,27 @@ class TestExecutorGitBranchIsolation:
             return result
 
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            # Mock the query function to avoid actual agent execution
-            async def mock_query(*args, **kwargs):
-                from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.chdir'):
+                with patch('os.getcwd', return_value='/mock/repo'):
+                    # Mock the query function to avoid actual agent execution
+                    async def mock_query(*args, **kwargs):
+                        from claude_agent_sdk.types import AssistantMessage, TextBlock
 
-                msg = MagicMock(spec=AssistantMessage)
-                msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Created branch\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                msg.result = "Work done"
-                yield msg
+                        msg = MagicMock(spec=AssistantMessage)
+                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Created branch\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
+                        msg.result = "Work done"
+                        yield msg
 
-            with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                result = await run_executor(
-                    iteration_intent="Test task",
-                    spec_content="Test spec",
-                    memory="",
-                    work_item_id="ralph-abc123"
-                )
+                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
+                        result = await run_executor(
+                            iteration_intent="Test task",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-abc123"
+                        )
 
-        # Verify a git checkout -b command was issued for the feature branch
-        branch_create_cmds = [cmd for cmd in git_commands if 'checkout' in ' '.join(cmd) and '-b' in cmd]
+        # Verify a branch creation command was issued (now via 'git branch')
+        branch_create_cmds = [cmd for cmd in git_commands if 'branch' in ' '.join(cmd) and 'ralph2/ralph-abc123' in ' '.join(cmd)]
         assert len(branch_create_cmds) > 0, "No branch creation command found"
 
         # Verify the branch name follows the pattern ralph2/<work-item-id>
@@ -68,21 +70,23 @@ class TestExecutorGitBranchIsolation:
             return result
 
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            async def mock_query(*args, **kwargs):
-                from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.chdir'):
+                with patch('os.getcwd', return_value='/mock/repo'):
+                    async def mock_query(*args, **kwargs):
+                        from claude_agent_sdk.types import AssistantMessage, TextBlock
 
-                msg = MagicMock(spec=AssistantMessage)
-                msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                msg.result = "Work done"
-                yield msg
+                        msg = MagicMock(spec=AssistantMessage)
+                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
+                        msg.result = "Work done"
+                        yield msg
 
-            with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                result = await run_executor(
-                    iteration_intent="Test task",
-                    spec_content="Test spec",
-                    memory="",
-                    work_item_id="ralph-xyz789"
-                )
+                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
+                        result = await run_executor(
+                            iteration_intent="Test task",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-xyz789"
+                        )
 
         # Verify merge sequence: checkout main, merge feature branch
         checkout_main_cmds = [cmd for cmd in git_commands if 'checkout' in ' '.join(cmd) and 'main' in ' '.join(cmd)]
@@ -109,21 +113,23 @@ class TestExecutorGitBranchIsolation:
             return result
 
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            async def mock_query(*args, **kwargs):
-                from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.chdir'):
+                with patch('os.getcwd', return_value='/mock/repo'):
+                    async def mock_query(*args, **kwargs):
+                        from claude_agent_sdk.types import AssistantMessage, TextBlock
 
-                msg = MagicMock(spec=AssistantMessage)
-                msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Partial work\nBlockers: Missing dependency\nNotes: Cannot proceed\nEfficiency Notes: None")]
-                msg.result = "Blocked"
-                yield msg
+                        msg = MagicMock(spec=AssistantMessage)
+                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Partial work\nBlockers: Missing dependency\nNotes: Cannot proceed\nEfficiency Notes: None")]
+                        msg.result = "Blocked"
+                        yield msg
 
-            with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                result = await run_executor(
-                    iteration_intent="Test task",
-                    spec_content="Test spec",
-                    memory="",
-                    work_item_id="ralph-blocked1"
-                )
+                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
+                        result = await run_executor(
+                            iteration_intent="Test task",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-blocked1"
+                        )
 
         # Verify no merge command was issued
         merge_cmds = [cmd for cmd in git_commands if 'merge' in ' '.join(cmd)]
@@ -154,21 +160,23 @@ class TestExecutorGitBranchIsolation:
             return result
 
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            async def mock_query(*args, **kwargs):
-                from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.chdir'):
+                with patch('os.getcwd', return_value='/mock/repo'):
+                    async def mock_query(*args, **kwargs):
+                        from claude_agent_sdk.types import AssistantMessage, TextBlock
 
-                msg = MagicMock(spec=AssistantMessage)
-                msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                msg.result = "Work done"
-                yield msg
+                        msg = MagicMock(spec=AssistantMessage)
+                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
+                        msg.result = "Work done"
+                        yield msg
 
-            with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                result = await run_executor(
-                    iteration_intent="Test task",
-                    spec_content="Test spec",
-                    memory="",
-                    work_item_id="ralph-conflict1"
-                )
+                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
+                        result = await run_executor(
+                            iteration_intent="Test task",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-conflict1"
+                        )
 
         # Verify status is Blocked due to merge conflict
         assert result["status"] == "Blocked", "Executor should report Blocked status on merge conflict"

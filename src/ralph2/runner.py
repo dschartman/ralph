@@ -167,13 +167,42 @@ class Ralph2Runner:
         return str(output_path)
 
     def _cleanup_abandoned_branches(self):
-        """Clean up abandoned ralph2/* feature branches from interrupted work."""
+        """Clean up abandoned ralph2/* feature branches and worktrees from interrupted work."""
         try:
             import subprocess
             # Use project root as working directory
             cwd = self.project_context.project_root
 
-            # Get list of ralph2/* branches
+            # First, clean up any abandoned worktrees
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=cwd
+            )
+
+            if result.returncode == 0:
+                # Parse worktree list to find ralph2-executor-* worktrees
+                lines = result.stdout.strip().split('\n')
+                worktree_paths = []
+                for line in lines:
+                    if line.startswith('worktree '):
+                        worktree_path = line.replace('worktree ', '').strip()
+                        if 'ralph2-executor-' in worktree_path:
+                            worktree_paths.append(worktree_path)
+
+                # Remove each abandoned worktree
+                for worktree_path in worktree_paths:
+                    print(f"   🧹 Cleaning up abandoned worktree: {worktree_path}")
+                    subprocess.run(
+                        ["git", "worktree", "remove", worktree_path, "--force"],
+                        capture_output=True,
+                        check=False,
+                        cwd=cwd
+                    )
+
+            # Then, clean up any abandoned ralph2/* branches
             result = subprocess.run(
                 ["git", "branch", "--list", "ralph2/*"],
                 capture_output=True,
@@ -187,20 +216,7 @@ class Ralph2Runner:
                 for branch in branches:
                     if branch:
                         print(f"   🧹 Cleaning up abandoned branch: {branch}")
-                        # Switch to main/master first if we're on a ralph2 branch
-                        subprocess.run(
-                            ["git", "checkout", "main"],
-                            capture_output=True,
-                            check=False,
-                            cwd=cwd
-                        )
-                        subprocess.run(
-                            ["git", "checkout", "master"],
-                            capture_output=True,
-                            check=False,
-                            cwd=cwd
-                        )
-                        # Delete the branch
+                        # Delete the branch (no need to checkout since we're in main repo)
                         subprocess.run(
                             ["git", "branch", "-D", branch],
                             capture_output=True,
@@ -208,7 +224,7 @@ class Ralph2Runner:
                             cwd=cwd
                         )
         except Exception as e:
-            print(f"   ⚠️  Warning: Could not clean up branches: {e}")
+            print(f"   ⚠️  Warning: Could not clean up branches/worktrees: {e}")
 
     async def run(self, max_iterations: int = 50) -> str:
         """

@@ -63,9 +63,11 @@ async def test_new_run_when_no_existing_run(project_context, temp_project_dir):
     assert len(runs) == 0
 
     # Mock agents to return immediately
+    # Also mock _ensure_root_work_item since this test doesn't set up git/trace
     with patch('ralph2.runner.run_planner') as mock_planner, \
          patch('ralph2.runner.run_executor') as mock_executor, \
-         patch('ralph2.runner.run_verifier') as mock_verifier:
+         patch('ralph2.runner.run_verifier') as mock_verifier, \
+         patch.object(runner, '_ensure_root_work_item', return_value="test-root-id"):
 
         mock_planner.return_value = {
             "intent": "Test intent",
@@ -134,7 +136,8 @@ async def test_resume_interrupted_run(project_context, temp_project_dir):
     # Mock agents to return immediately
     with patch('ralph2.runner.run_planner') as mock_planner, \
          patch('ralph2.runner.run_executor') as mock_executor, \
-         patch('ralph2.runner.run_verifier') as mock_verifier:
+         patch('ralph2.runner.run_verifier') as mock_verifier, \
+         patch.object(runner, '_ensure_root_work_item', return_value="test-root-id"):
 
         mock_planner.return_value = {
             "intent": "Resume intent",
@@ -183,7 +186,8 @@ async def test_new_run_when_previous_run_completed(project_context, temp_project
     runner = Ralph2Runner(spec_path, project_context)
 
     # Mock agents to return immediately
-    with patch('ralph2.runner.run_planner') as mock_planner:
+    with patch('ralph2.runner.run_planner') as mock_planner, \
+         patch.object(runner, '_ensure_root_work_item', return_value="test-root-id"):
         mock_planner.return_value = {
             "intent": "New run intent",
             "decision": {"decision": "DONE", "reason": "New run complete"},
@@ -240,7 +244,8 @@ async def test_cleanup_abandoned_branches_on_resume(project_context, temp_projec
     # Create runner and run (should clean up branches)
     runner = Ralph2Runner(spec_path, project_context)
 
-    with patch('ralph2.runner.run_planner') as mock_planner:
+    with patch('ralph2.runner.run_planner') as mock_planner, \
+         patch.object(runner, '_ensure_root_work_item', return_value="test-root-id"):
         mock_planner.return_value = {
             "intent": "Resume with cleanup",
             "decision": {"decision": "DONE", "reason": "Cleaned up"},

@@ -28,11 +28,13 @@ def ralph2_runner():
 
         context = MagicMock(spec=ProjectContext)
         context.project_id = "test-project-id"
+        context.project_root = Path(tmpdir)
         context.db_path = project_dir / "ralph2.db"
         context.outputs_dir = project_dir / "outputs"
         context.summaries_dir = project_dir / "summaries"
 
-        runner = Ralph2Runner(spec_path, context)
+        # Provide a test root work item ID to avoid subprocess calls to trc
+        runner = Ralph2Runner(spec_path, context, root_work_item_id="ralph-test-root")
 
         try:
             yield runner

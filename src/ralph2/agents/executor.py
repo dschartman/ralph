@@ -8,36 +8,77 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
 
 
-def _git_run(command: list[str]) -> subprocess.CompletedProcess:
-    """Run a git command and return the result."""
-    return subprocess.run(command, capture_output=True, text=True)
+def _git_run(command: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Run a git command and return the result.
 
-
-def _create_feature_branch(work_item_id: str) -> bool:
-    """Create and checkout a feature branch for the work item.
+    Args:
+        command: Git command as list of strings
+        cwd: Optional working directory for the command
 
     Returns:
-        True if successful, False otherwise
+        CompletedProcess result
+    """
+    return subprocess.run(command, capture_output=True, text=True, cwd=cwd)
+
+
+def _get_worktree_path(work_item_id: str) -> str:
+    """Get the worktree directory path for a work item.
+
+    Args:
+        work_item_id: Work item ID
+
+    Returns:
+        Absolute path to the worktree directory
+    """
+    import os
+    # Create worktree in a sibling directory to the main repo
+    # This ensures parallel executors have isolated filesystems
+    repo_root = os.getcwd()
+    parent_dir = os.path.dirname(repo_root)
+    worktree_path = os.path.join(parent_dir, f"ralph2-executor-{work_item_id}")
+    return worktree_path
+
+
+def _create_worktree(work_item_id: str) -> tuple[bool, str]:
+    """Create a git worktree for the work item with an isolated filesystem.
+
+    Returns:
+        (success, worktree_path or error_message)
     """
     branch_name = f"ralph2/{work_item_id}"
-    result = _git_run(["git", "checkout", "-b", branch_name])
-    return result.returncode == 0
+    worktree_path = _get_worktree_path(work_item_id)
+
+    # Create the branch first (from current HEAD)
+    result = _git_run(["git", "branch", branch_name])
+    if result.returncode != 0:
+        return False, f"Failed to create branch: {result.stderr}"
+
+    # Create worktree for the branch
+    result = _git_run(["git", "worktree", "add", worktree_path, branch_name])
+    if result.returncode != 0:
+        # Cleanup branch if worktree creation failed
+        _git_run(["git", "branch", "-D", branch_name])
+        return False, f"Failed to create worktree: {result.stderr}"
+
+    return True, worktree_path
 
 
 def _merge_to_main(work_item_id: str) -> tuple[bool, str]:
     """Merge feature branch to main.
+
+    This runs in the main repository (not the worktree).
 
     Returns:
         (success, error_message)
     """
     branch_name = f"ralph2/{work_item_id}"
 
-    # Checkout main
+    # We're already in the main repo, just ensure we're on main branch
     result = _git_run(["git", "checkout", "main"])
     if result.returncode != 0:
         return False, f"Failed to checkout main: {result.stderr}"
 
-    # Merge feature branch
+    # Merge feature branch from the worktree
     result = _git_run(["git", "merge", branch_name])
     if result.returncode != 0:
         # Merge conflict or error - return conflict info for resolution attempt
@@ -68,20 +109,24 @@ def _check_merge_conflicts() -> tuple[bool, str]:
     return False, ""
 
 
-def _delete_feature_branch(work_item_id: str) -> bool:
-    """Delete the feature branch.
+def _cleanup_worktree(work_item_id: str) -> bool:
+    """Remove the worktree and delete the feature branch.
 
     Returns:
         True if successful, False otherwise
     """
     branch_name = f"ralph2/{work_item_id}"
+    worktree_path = _get_worktree_path(work_item_id)
 
-    # First checkout main to avoid deleting the current branch
-    _git_run(["git", "checkout", "main"])
+    # Remove the worktree
+    result = _git_run(["git", "worktree", "remove", worktree_path, "--force"])
+    worktree_removed = result.returncode == 0
 
     # Delete the branch
     result = _git_run(["git", "branch", "-D", branch_name])
-    return result.returncode == 0
+    branch_deleted = result.returncode == 0
+
+    return worktree_removed and branch_deleted
 
 
 EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Temper multi-agent system.
@@ -276,16 +321,26 @@ async def run_executor(
 
     prompt = "\n".join(prompt_parts)
 
-    # Git isolation: Create feature branch if work_item_id is provided
+    # Git isolation: Create worktree if work_item_id is provided
+    worktree_path = None
+    original_cwd = None
+
     if work_item_id:
-        if not _create_feature_branch(work_item_id):
+        success, result = _create_worktree(work_item_id)
+        if not success:
             return {
                 "status": "Blocked",
-                "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Failed to create feature branch\nBlockers: Git branch creation failed for ralph2/{work_item_id}\nNotes: Cannot proceed without branch isolation\nEfficiency Notes: None",
+                "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Failed to create git worktree\nBlockers: {result}\nNotes: Cannot proceed without worktree isolation\nEfficiency Notes: None",
                 "full_output": "",
                 "efficiency_notes": None,
                 "messages": [],
             }
+        worktree_path = result
+
+        # Change to the worktree directory so the agent works in isolation
+        import os
+        original_cwd = os.getcwd()
+        os.chdir(worktree_path)
 
     # Run the executor agent
     full_output = []
@@ -360,12 +415,20 @@ async def run_executor(
         # Fallback: create a summary
         summary = "EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work completed\n"
 
-    # Git isolation: Handle merge/delete based on status
+    # Git isolation: Handle merge/cleanup based on status
     if work_item_id:
+        # First, restore working directory to the main repo
+        if original_cwd:
+            import os
+            os.chdir(original_cwd)
+
         if status == "Completed":
             # Attempt to merge to main
             merge_success, merge_error = _merge_to_main(work_item_id)
-            if not merge_success:
+            if merge_success:
+                # Merge succeeded - clean up worktree
+                _cleanup_worktree(work_item_id)
+            else:
                 # Merge failed - attempt resolution before abandoning
                 print(f"\033[33m⚠ Merge conflict detected. Attempting resolution...\033[0m")
 
@@ -452,19 +515,20 @@ If you cannot resolve the conflicts, report Status: Blocked with details about w
 
                 # Final status check
                 if not merge_success:
-                    # Resolution failed - abandon branch
+                    # Resolution failed - abandon worktree and branch
                     status = "Blocked"
-                    summary = f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Work completed but merge conflict resolution failed\nBlockers: {merge_error}\nNotes: Attempted automatic conflict resolution but failed. Feature branch ralph2/{work_item_id} abandoned.\nEfficiency Notes: {efficiency_notes or 'None'}"
-                    _delete_feature_branch(work_item_id)
+                    summary = f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Work completed but merge conflict resolution failed\nBlockers: {merge_error}\nNotes: Attempted automatic conflict resolution but failed. Worktree and branch abandoned.\nEfficiency Notes: {efficiency_notes or 'None'}"
+                    _cleanup_worktree(work_item_id)
                 else:
-                    # Resolution succeeded!
+                    # Resolution succeeded! Clean up worktree
                     print(f"\033[32m✓ Merge conflicts resolved and merged successfully\033[0m")
+                    _cleanup_worktree(work_item_id)
         else:
-            # Status is Blocked or Uncertain - abandon the branch
-            _delete_feature_branch(work_item_id)
+            # Status is Blocked or Uncertain - abandon the worktree and branch
+            _cleanup_worktree(work_item_id)
             # Update summary to note branch abandonment
             if "Efficiency Notes:" not in summary:
-                summary += f"\nNotes: Feature branch ralph2/{work_item_id} abandoned due to {status} status"
+                summary += f"\nNotes: Worktree and branch abandoned due to {status} status"
 
     return {
         "status": status,
