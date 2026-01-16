@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 import json
+from contextlib import contextmanager
 
 from .models import Run, Iteration, AgentOutput, HumanInput
 
@@ -23,6 +24,9 @@ class Ralph2DB:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
+        self._in_transaction = False
+        self._transaction_depth = 0
+        self._closed = False
         self._init_schema()
 
     def _init_schema(self):
@@ -90,6 +94,87 @@ class Ralph2DB:
 
         self.conn.commit()
 
+    @contextmanager
+    def transaction(self):
+        """
+        Context manager for database transactions.
+
+        Usage:
+            with db.transaction():
+                db.create_run(run)
+                db.create_iteration(iteration)
+
+        If an exception occurs, the transaction is rolled back.
+        Otherwise, it is committed when the context exits.
+
+        Supports nested transactions using savepoints.
+        """
+        self._transaction_depth += 1
+        savepoint_name = f"sp_{self._transaction_depth}"
+
+        if self._transaction_depth == 1:
+            # First level: start a real transaction
+            self.conn.execute("BEGIN")
+        else:
+            # Nested level: use savepoint
+            self.conn.execute(f"SAVEPOINT {savepoint_name}")
+
+        try:
+            yield
+            # Commit on successful exit
+            if self._transaction_depth == 1:
+                self.conn.commit()
+            else:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        except Exception:
+            # Rollback on error
+            if self._transaction_depth == 1:
+                self.conn.rollback()
+            else:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def begin_transaction(self):
+        """
+        Manually begin a transaction.
+
+        Must be paired with commit_transaction() or rollback_transaction().
+        Prefer using the transaction() context manager when possible.
+        """
+        if not self._in_transaction:
+            self.conn.execute("BEGIN")
+            self._in_transaction = True
+
+    def commit_transaction(self):
+        """
+        Manually commit the current transaction.
+
+        Only commits if a transaction was started with begin_transaction().
+        """
+        if self._in_transaction:
+            self.conn.commit()
+            self._in_transaction = False
+
+    def rollback_transaction(self):
+        """
+        Manually rollback the current transaction.
+
+        Only rolls back if a transaction was started with begin_transaction().
+        """
+        if self._in_transaction:
+            self.conn.rollback()
+            self._in_transaction = False
+
+    def _should_auto_commit(self) -> bool:
+        """
+        Determine if operations should auto-commit.
+
+        Returns False if we're inside a transaction context or manual transaction.
+        """
+        return self._transaction_depth == 0 and not self._in_transaction
+
     def create_run(self, run: Run) -> Run:
         """Create a new run."""
         cursor = self.conn.cursor()
@@ -106,7 +191,8 @@ class Ralph2DB:
             run.ended_at.isoformat() if run.ended_at else None,
             run.root_work_item_id
         ))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
         return run
 
     def get_run(self, run_id: str) -> Optional[Run]:
@@ -135,7 +221,8 @@ class Ralph2DB:
             SET status = ?, ended_at = ?
             WHERE id = ?
         """, (status, ended_at.isoformat() if ended_at else None, run_id))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
 
     def update_run_root_work_item(self, run_id: str, root_work_item_id: str):
         """Update run's root work item ID."""
@@ -145,7 +232,8 @@ class Ralph2DB:
             SET root_work_item_id = ?
             WHERE id = ?
         """, (root_work_item_id, run_id))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
 
     def get_latest_run(self) -> Optional[Run]:
         """Get the most recent run."""
@@ -198,7 +286,8 @@ class Ralph2DB:
             iteration.started_at.isoformat(),
             iteration.ended_at.isoformat() if iteration.ended_at else None
         ))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
         iteration.id = cursor.lastrowid
         return iteration
 
@@ -227,7 +316,8 @@ class Ralph2DB:
             SET outcome = ?, ended_at = ?
             WHERE id = ?
         """, (outcome, ended_at.isoformat(), iteration_id))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
 
     def list_iterations(self, run_id: str) -> List[Iteration]:
         """List all iterations for a run."""
@@ -292,7 +382,8 @@ class Ralph2DB:
             output.raw_output_path,
             output.summary
         ))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
         output.id = cursor.lastrowid
         return output
 
@@ -384,7 +475,8 @@ class Ralph2DB:
             human_input.created_at.isoformat(),
             human_input.consumed_at.isoformat() if human_input.consumed_at else None
         ))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
         human_input.id = cursor.lastrowid
         return human_input
 
@@ -417,8 +509,26 @@ class Ralph2DB:
             SET consumed_at = ?
             WHERE id = ?
         """, (consumed_at.isoformat(), input_id))
-        self.conn.commit()
+        if self._should_auto_commit():
+            self.conn.commit()
 
     def close(self):
-        """Close database connection."""
-        self.conn.close()
+        """
+        Close database connection safely.
+
+        Safe to call multiple times - subsequent calls are no-ops.
+        Handles connection errors gracefully by catching exceptions
+        and ensuring _closed flag is always set.
+        """
+        if self._closed:
+            return
+
+        try:
+            self.conn.close()
+        except Exception:
+            # Connection may already be closed or in error state.
+            # We suppress exceptions here since the goal is cleanup -
+            # there's nothing useful we can do with a close failure.
+            pass
+        finally:
+            self._closed = True

@@ -5,7 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple, List, Dict, Any
+from dataclasses import dataclass
 import uuid
 import json
 
@@ -17,6 +18,50 @@ from .agents.verifier import run_verifier
 from .agents.specialist import CodeReviewerSpecialist, run_specialist
 from .project import ProjectContext, read_memory
 from .feedback import create_work_items_from_feedback
+from .milestone import complete_milestone
+
+
+@dataclass
+class IterationContext:
+    """Context passed between iteration phases."""
+    run_id: str
+    iteration_id: int
+    iteration_number: int
+    intent: str
+    memory: str
+    last_executor_summary: Optional[str] = None
+    last_verifier_assessment: Optional[str] = None
+    last_specialist_feedback: Optional[str] = None
+    decision: Optional[Dict[str, Any]] = None
+    iteration_plan: Optional[Dict[str, Any]] = None
+
+
+def validate_work_item_id(work_item_id: str) -> bool:
+    """
+    Validate that a work item ID matches expected format.
+
+    Work item IDs can be in formats like:
+    - "ralph-1abc23" (standard format)
+    - "tmpro-ddk9g-b2fi3m" (multiple segments, e.g., from temp directories)
+    - "ralph2-executor-ralph-0ikoux" (nested/compound IDs)
+
+    This validation prevents command injection and path traversal attacks
+    while allowing the various ID formats Trace generates.
+
+    Args:
+        work_item_id: The work item ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not work_item_id:
+        return False
+
+    # Allow alphanumeric segments separated by hyphens or underscores
+    # Must start with a letter, no special characters (no path separators, shell metacharacters)
+    # Segments can be alphanumeric, separated by hyphens
+    pattern = r'^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)+$'
+    return bool(re.match(pattern, work_item_id))
 
 
 def _extract_spec_title(spec_content: str) -> str:
@@ -51,9 +96,17 @@ class Ralph2Runner:
             spec_path: Path to the Ralph2file (spec)
             project_context: ProjectContext with paths for state storage
             root_work_item_id: Optional root work item ID (spec milestone in Trace)
+
+        Raises:
+            ValueError: If root_work_item_id is provided but has invalid format
         """
         self.spec_path = spec_path
         self.project_context = project_context
+
+        # Validate root_work_item_id format before any subprocess calls
+        if root_work_item_id is not None and not validate_work_item_id(root_work_item_id):
+            raise ValueError(f"Invalid work item ID format: {root_work_item_id}")
+
         self.db = Ralph2DB(str(project_context.db_path))
         self.root_work_item_id = root_work_item_id
 
@@ -98,6 +151,15 @@ class Ralph2Runner:
                     if result.returncode == 0:
                         self.root_work_item_id = existing_run.root_work_item_id
                         return self.root_work_item_id
+                    else:
+                        # Check if it's a "not found" error (expected) vs other errors (should be logged)
+                        stderr_lower = result.stderr.lower() if result.stderr else ""
+                        if "not found" in stderr_lower or "does not exist" in stderr_lower:
+                            # Expected case: work item was deleted or doesn't exist, continue silently
+                            pass
+                        else:
+                            # Unexpected error: log it explicitly
+                            print(f"   ⚠️  Warning: Error verifying work item {existing_run.root_work_item_id}: {result.stderr.strip() if result.stderr else 'Unknown error'}")
                 except Exception as e:
                     print(f"   ⚠️  Warning: Could not verify existing root work item: {e}")
 
@@ -169,510 +231,475 @@ class Ralph2Runner:
     def _cleanup_abandoned_branches(self):
         """Clean up abandoned ralph2/* feature branches and worktrees from interrupted work."""
         try:
-            import subprocess
-            # Use project root as working directory
             cwd = self.project_context.project_root
-
-            # First, clean up any abandoned worktrees
-            result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=cwd
-            )
-
-            if result.returncode == 0:
-                # Parse worktree list to find ralph2-executor-* worktrees
-                lines = result.stdout.strip().split('\n')
-                worktree_paths = []
-                for line in lines:
-                    if line.startswith('worktree '):
-                        worktree_path = line.replace('worktree ', '').strip()
-                        if 'ralph2-executor-' in worktree_path:
-                            worktree_paths.append(worktree_path)
-
-                # Remove each abandoned worktree
-                for worktree_path in worktree_paths:
-                    print(f"   🧹 Cleaning up abandoned worktree: {worktree_path}")
-                    subprocess.run(
-                        ["git", "worktree", "remove", worktree_path, "--force"],
-                        capture_output=True,
-                        check=False,
-                        cwd=cwd
-                    )
-
-            # Then, clean up any abandoned ralph2/* branches
-            result = subprocess.run(
-                ["git", "branch", "--list", "ralph2/*"],
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=cwd
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                branches = [b.strip().replace('* ', '') for b in result.stdout.strip().split('\n')]
-                for branch in branches:
-                    if branch:
-                        print(f"   🧹 Cleaning up abandoned branch: {branch}")
-                        # Delete the branch (no need to checkout since we're in main repo)
-                        subprocess.run(
-                            ["git", "branch", "-D", branch],
-                            capture_output=True,
-                            check=False,
-                            cwd=cwd
-                        )
+            self._cleanup_worktrees(cwd)
+            self._cleanup_branches(cwd)
         except Exception as e:
             print(f"   ⚠️  Warning: Could not clean up branches/worktrees: {e}")
 
-    async def run(self, max_iterations: int = 50) -> str:
-        """
-        Run Ralph2 until completion or max iterations.
+    def _cleanup_worktrees(self, cwd):
+        """Clean up abandoned worktrees."""
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, cwd=cwd
+        )
+        if result.returncode != 0:
+            return
 
-        Args:
-            max_iterations: Maximum number of iterations to run
+        lines = result.stdout.strip().split('\n')
+        for line in lines:
+            if line.startswith('worktree '):
+                worktree_path = line.replace('worktree ', '').strip()
+                if 'ralph2-executor-' in worktree_path:
+                    print(f"   🧹 Cleaning up abandoned worktree: {worktree_path}")
+                    subprocess.run(
+                        ["git", "worktree", "remove", worktree_path, "--force"],
+                        capture_output=True, check=False, cwd=cwd
+                    )
+
+    def _cleanup_branches(self, cwd):
+        """Clean up abandoned ralph2/* branches."""
+        result = subprocess.run(
+            ["git", "branch", "--list", "ralph2/*"],
+            capture_output=True, text=True, check=False, cwd=cwd
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+
+        branches = [b.strip().replace('* ', '') for b in result.stdout.strip().split('\n')]
+        for branch in branches:
+            if branch:
+                print(f"   🧹 Cleaning up abandoned branch: {branch}")
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    capture_output=True, check=False, cwd=cwd
+                )
+
+    def _handle_human_inputs(self, run_id: str) -> Tuple[Optional[str], List[str]]:
+        """Process human inputs and return early exit status if needed.
 
         Returns:
-            Final status: "completed", "stuck", or "max_iterations"
+            (exit_status, human_messages) - exit_status is "paused" or "aborted" if early exit
         """
-        # Check if there's an interrupted run to resume
-        existing_run = self.db.get_latest_run()
+        human_inputs = self.db.get_unconsumed_inputs(run_id)
+        human_input_messages = []
 
-        if existing_run and existing_run.status == "running":
-            # Resume interrupted run
-            run_id = existing_run.id
-            run = existing_run
+        for human_input in human_inputs:
+            if human_input.input_type == "comment":
+                human_input_messages.append(human_input.content)
+                self.db.mark_input_consumed(human_input.id, datetime.now())
+            elif human_input.input_type == "pause":
+                print("⏸️  Pausing run (human requested)")
+                self.db.update_run_status(run_id, "paused", datetime.now())
+                return "paused", []
+            elif human_input.input_type == "abort":
+                print("🛑 Aborting run (human requested)")
+                self.db.update_run_status(run_id, "aborted", datetime.now())
+                return "aborted", []
 
-            # Update max_iterations in config if different
-            run.config["max_iterations"] = max_iterations
+        return None, human_input_messages
 
-            print(f"♻️  Resuming interrupted Ralph2 run: {run_id}")
-            print(f"📋 Spec: {self.spec_path}")
+    async def _run_planner_phase(self, ctx: IterationContext, human_messages: List[str]) -> Tuple[bool, Optional[str]]:
+        """Run the planner phase.
 
-            # Clean up any abandoned feature branches
-            print(f"🧹 Cleaning up abandoned work from interruption...")
-            self._cleanup_abandoned_branches()
-            print()
-
-            # Get the last completed iteration number
-            last_iteration = self.db.get_latest_iteration(run_id)
-            iteration_number = last_iteration.number if last_iteration else 0
-
-            print(f"   Resuming from iteration {iteration_number + 1}")
-            print()
-
-            # Get last agent outputs for context
-            if last_iteration:
-                agent_outputs = self.db.get_agent_outputs(last_iteration.id)
-                last_executor_summary = None
-                last_verifier_assessment = None
-                last_specialist_feedback = None
-
-                for output in agent_outputs:
-                    if output.agent_type.startswith("executor"):
-                        if last_executor_summary is None:
-                            last_executor_summary = output.summary
-                        else:
-                            last_executor_summary += f"\n\n{output.summary}"
-                    elif output.agent_type == "verifier":
-                        last_verifier_assessment = output.summary
-                    elif "specialist" in output.agent_type.lower() or "reviewer" in output.agent_type.lower():
-                        if last_specialist_feedback is None:
-                            last_specialist_feedback = output.summary
-                        else:
-                            last_specialist_feedback += f"\n\n{output.summary}"
-            else:
-                last_executor_summary = None
-                last_verifier_assessment = None
-                last_specialist_feedback = None
-        else:
-            # Create a new run
-            run_id = f"ralph2-{uuid.uuid4().hex[:8]}"
-            run = Run(
-                id=run_id,
-                spec_path=self.spec_path,
-                spec_content=self.spec_content,
-                status="running",
-                config={"max_iterations": max_iterations},
-                started_at=datetime.now()
-            )
-            self.db.create_run(run)
-
-            print(f"🚀 Starting Ralph2 run: {run_id}")
-            print(f"📋 Spec: {self.spec_path}")
-            print()
-
-            iteration_number = 0
-            last_executor_summary = None
-            last_verifier_assessment = None
-            last_specialist_feedback = None
-
-        # Ensure root work item exists and is stored
+        Returns:
+            (success, early_exit_status) - early_exit_status is the status if run should end
+        """
+        print("🧠 Running Planner...")
         try:
-            root_work_item_id = self._ensure_root_work_item()
-            # Store it in the current run if not already stored
-            current_run = self.db.get_run(run_id)
-            if current_run and not current_run.root_work_item_id:
-                self.db.update_run_root_work_item(run_id, root_work_item_id)
-        except RuntimeError as e:
-            print(f"   ❌ Error setting up root work item: {e}")
-            self.db.update_run_status(run_id, "stuck", datetime.now())
+            planner_result = await run_planner(
+                spec_content=self.spec_content,
+                last_executor_summary=ctx.last_executor_summary,
+                last_verifier_assessment=ctx.last_verifier_assessment,
+                last_specialist_feedback=ctx.last_specialist_feedback,
+                human_inputs=human_messages if human_messages else None,
+                memory=ctx.memory,
+                project_id=self.project_context.project_id,
+                root_work_item_id=self.root_work_item_id
+            )
+        except Exception as e:
+            print(f"   ❌ Planner error: {e}")
+            self.db.update_iteration(ctx.iteration_id, "STUCK", datetime.now())
+            self.db.update_run_status(ctx.run_id, "stuck", datetime.now())
+            self._write_summary(ctx.run_id)
+            return False, "stuck"
+
+        ctx.intent = planner_result["intent"]
+        ctx.decision = planner_result["decision"]
+        ctx.iteration_plan = planner_result.get("iteration_plan")
+        print(f"   Decision: {ctx.decision['decision']} - {ctx.decision['reason']}")
+        print(f"   Intent: {ctx.intent}\n")
+
+        # Update iteration with intent
+        self.db.conn.execute("UPDATE iterations SET intent = ? WHERE id = ?", (ctx.intent, ctx.iteration_id))
+        self.db.conn.commit()
+
+        # Save planner output
+        planner_output_path = self._save_agent_messages(ctx.iteration_id, "planner", planner_result["messages"])
+        self.db.create_agent_output(AgentOutput(
+            id=None, iteration_id=ctx.iteration_id, agent_type="planner",
+            raw_output_path=planner_output_path, summary=ctx.intent
+        ))
+
+        # Check if planner decided to stop
+        if ctx.decision['decision'] in ('DONE', 'STUCK'):
+            return self._handle_planner_termination(ctx)
+
+        return True, None
+
+    def _handle_planner_termination(self, ctx: IterationContext) -> Tuple[bool, str]:
+        """Handle DONE or STUCK decisions from planner."""
+        decision = ctx.decision['decision']
+        print(f"   Planner decided {decision}, skipping executor and feedback phases")
+        self.db.update_iteration(ctx.iteration_id, decision, datetime.now())
+
+        if decision == "DONE":
+            print("\n✅ Planner decided: DONE - Spec satisfied!")
+            print(f"   Reason: {ctx.decision['reason']}")
+
+            # Complete milestone: reparent remaining work and close root work item
+            if self.root_work_item_id:
+                try:
+                    new_parent_ids = complete_milestone(
+                        self.root_work_item_id,
+                        str(self.project_context.project_root)
+                    )
+                    if new_parent_ids:
+                        print(f"   📋 Milestone completed: {len(new_parent_ids)} category work items created for remaining work")
+                    else:
+                        print(f"   📋 Milestone completed: root work item closed")
+                except Exception as e:
+                    print(f"   ⚠️  Warning: Could not complete milestone: {e}")
+
+            self.db.update_run_status(ctx.run_id, "completed", datetime.now())
+            self._write_summary(ctx.run_id)
+            return False, "completed"
+        else:  # STUCK
+            print("\n⚠️  Planner decided: STUCK - Cannot make progress")
+            print(f"   Reason: {ctx.decision['reason']}")
+            if ctx.decision.get('blocker'):
+                print(f"   Blocker: {ctx.decision['blocker']}")
+            self.db.update_run_status(ctx.run_id, "stuck", datetime.now())
+            self._write_summary(ctx.run_id)
+            return False, "stuck"
+
+    async def _run_executor_phase(self, ctx: IterationContext) -> str:
+        """Run the executor phase (single or parallel).
+
+        Returns:
+            Combined executor summary
+        """
+        if ctx.iteration_plan and ctx.iteration_plan.get("work_items"):
+            return await self._run_parallel_executors(ctx)
+        else:
+            return await self._run_single_executor(ctx)
+
+    async def _run_parallel_executors(self, ctx: IterationContext) -> str:
+        """Run multiple executors in parallel."""
+        work_items = ctx.iteration_plan["work_items"]
+        print(f"⚙️  Running {len(work_items)} Executors in parallel...")
+
+        executor_tasks = [
+            run_executor(
+                iteration_intent=ctx.intent, spec_content=self.spec_content,
+                memory=ctx.memory, work_item_id=wi["work_item_id"],
+                run_id=ctx.run_id  # Pass run_id for worktree path isolation
+            )
+            for wi in work_items
+        ]
+
+        executor_results = await asyncio.gather(*executor_tasks, return_exceptions=True)
+        all_summaries = []
+
+        for i, result in enumerate(executor_results):
+            work_item_id = work_items[i]["work_item_id"]
+            if isinstance(result, Exception):
+                print(f"   ❌ Executor {i+1} ({work_item_id}) error: {result}")
+                result = self._create_error_executor_result(result)
+
+            status, summary = result["status"], result["summary"]
+            print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
+
+            executor_output_path = self._save_agent_messages(
+                ctx.iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
+            )
+            self.db.create_agent_output(AgentOutput(
+                id=None, iteration_id=ctx.iteration_id, agent_type=f"executor_{i+1}",
+                raw_output_path=executor_output_path, summary=summary
+            ))
+            all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
+
+        print()
+        return "\n\n".join(all_summaries)
+
+    async def _run_single_executor(self, ctx: IterationContext) -> str:
+        """Run a single executor."""
+        print("⚙️  Running Executor...")
+        try:
+            executor_result = await run_executor(
+                iteration_intent=ctx.intent, spec_content=self.spec_content, memory=ctx.memory
+            )
+        except Exception as e:
+            print(f"   ❌ Executor error: {e}")
+            executor_result = self._create_error_executor_result(e)
+
+        status, summary = executor_result["status"], executor_result["summary"]
+        print(f"   Status: {status}")
+        print(f"   Summary: {summary[:200]}...\n" if len(summary) > 200 else f"   Summary: {summary}\n")
+
+        executor_output_path = self._save_agent_messages(ctx.iteration_id, "executor", executor_result["messages"])
+        self.db.create_agent_output(AgentOutput(
+            id=None, iteration_id=ctx.iteration_id, agent_type="executor",
+            raw_output_path=executor_output_path, summary=summary
+        ))
+        return summary
+
+    def _create_error_executor_result(self, error: Exception) -> Dict[str, Any]:
+        """Create a fallback executor result for errors."""
+        return {
+            "status": "Blocked",
+            "summary": f"Status: Blocked\nWhat was done: Agent crashed with error\nBlockers: {error}\nNotes: Executor agent encountered an error and could not complete",
+            "full_output": str(error),
+            "messages": []
+        }
+
+    async def _run_feedback_phase(self, ctx: IterationContext) -> Tuple[str, str]:
+        """Run verifier and specialists in parallel.
+
+        Returns:
+            (verifier_assessment, specialist_feedback)
+        """
+        print("🔍 Running Feedback Generators (Verifier + Specialists)...")
+
+        specialists = [CodeReviewerSpecialist()]
+        feedback_tasks = [
+            run_verifier(spec_content=self.spec_content, memory=ctx.memory, root_work_item_id=self.root_work_item_id)
+        ]
+        for specialist in specialists:
+            feedback_tasks.append(run_specialist(
+                specialist=specialist,
+                spec_content=self.spec_content,
+                memory=ctx.memory,
+                root_work_item_id=self.root_work_item_id or ""
+            ))
+
+        feedback_results = await asyncio.gather(*feedback_tasks, return_exceptions=True)
+
+        # Process verifier
+        verifier_assessment = self._process_verifier_result(ctx, feedback_results[0])
+
+        # Process specialists
+        specialist_feedback = self._process_specialist_results(ctx, feedback_results[1:], specialists)
+
+        print()
+        return verifier_assessment, specialist_feedback
+
+    def _process_verifier_result(self, ctx: IterationContext, result) -> str:
+        """Process verifier result and save output."""
+        if isinstance(result, Exception):
+            print(f"   ❌ Verifier error: {result}")
+            result = {
+                "outcome": "CONTINUE",
+                "assessment": f"Outcome: CONTINUE\nReasoning: Verifier agent crashed with error: {result}\nGaps: Unable to verify - agent error",
+                "full_output": str(result),
+                "messages": []
+            }
+
+        outcome, assessment = result["outcome"], result["assessment"]
+        print(f"   Verifier Outcome: {outcome}")
+        print(f"   Assessment: {assessment[:200]}...\n" if len(assessment) > 200 else f"   Assessment: {assessment}\n")
+
+        verifier_output_path = self._save_agent_messages(ctx.iteration_id, "verifier", result["messages"])
+        self.db.create_agent_output(AgentOutput(
+            id=None, iteration_id=ctx.iteration_id, agent_type="verifier",
+            raw_output_path=verifier_output_path, summary=assessment
+        ))
+        return assessment
+
+    def _process_specialist_results(self, ctx: IterationContext, results: List, specialists: List) -> str:
+        """Process specialist results, create work items, and save outputs."""
+        specialist_feedback_summary = []
+
+        for i, result in enumerate(results):
+            specialist = specialists[i]
+            if isinstance(result, Exception):
+                print(f"   ❌ {specialist.name} error: {result}")
+                result = {"specialist_name": specialist.name, "error": str(result), "feedback": [], "full_output": "", "messages": []}
+
+            specialist_name = result["specialist_name"]
+            feedback_items = result.get("feedback", [])
+            print(f"   {specialist_name}: {len(feedback_items)} feedback items")
+
+            # Create work items from feedback
+            if feedback_items and self.root_work_item_id:
+                try:
+                    created_ids = create_work_items_from_feedback(
+                        feedback_items=feedback_items, specialist_name=specialist_name,
+                        root_work_item_id=self.root_work_item_id, project_root=str(self.project_context.project_root)
+                    )
+                    if created_ids:
+                        print(f"   → Created {len(created_ids)} work items from {specialist_name} feedback")
+                except Exception as e:
+                    print(f"   ⚠️  Warning: Could not create work items from {specialist_name} feedback: {e}")
+
+            # Save specialist output
+            specialist_output_path = self._save_agent_messages(ctx.iteration_id, specialist_name, result.get("messages", []))
+            feedback_summary = f"{specialist_name} feedback:\n"
+            feedback_summary += "\n".join(f"  - {item}" for item in feedback_items) if feedback_items else "  No issues found"
+
+            self.db.create_agent_output(AgentOutput(
+                id=None, iteration_id=ctx.iteration_id, agent_type=specialist_name,
+                raw_output_path=specialist_output_path, summary=feedback_summary
+            ))
+            specialist_feedback_summary.append(feedback_summary)
+
+        return "\n\n".join(specialist_feedback_summary) if specialist_feedback_summary else "No specialist feedback"
+
+    def _check_planner_decision(self, ctx: IterationContext) -> Optional[str]:
+        """Check planner decision and return status if run should end."""
+        planner_decision = ctx.decision['decision']
+
+        if planner_decision == "DONE":
+            print("\n✅ Planner decided: DONE - Spec satisfied!")
+            print(f"   Reason: {ctx.decision['reason']}")
+            self.db.update_run_status(ctx.run_id, "completed", datetime.now())
+            self._write_summary(ctx.run_id)
+            return "completed"
+
+        elif planner_decision == "STUCK":
+            print("\n⚠️  Planner decided: STUCK - Cannot make progress")
+            print(f"   Reason: {ctx.decision['reason']}")
+            if ctx.decision.get('blocker'):
+                print(f"   Blocker: {ctx.decision['blocker']}")
+            self.db.update_run_status(ctx.run_id, "stuck", datetime.now())
+            self._write_summary(ctx.run_id)
             return "stuck"
 
-        # Read project memory
+        return None
+
+    async def run(self, max_iterations: int = 50) -> str:
+        """Run Ralph2 until completion or max iterations."""
+        # Initialize or resume run
+        run_id, iteration_number, last_exec, last_verify, last_spec = self._initialize_run(max_iterations)
+
+        # Setup root work item
+        setup_result = self._setup_root_work_item(run_id)
+        if setup_result:
+            return setup_result
+
         memory = read_memory(self.project_context.project_id)
 
         while iteration_number < max_iterations:
             iteration_number += 1
-            print(f"\n{'='*60}")
-            print(f"Iteration {iteration_number}")
-            print(f"{'='*60}\n")
+            print(f"\n{'='*60}\nIteration {iteration_number}\n{'='*60}\n")
 
-            # Check for human input
-            human_inputs = self.db.get_unconsumed_inputs(run_id)
-            human_input_messages = []
-
-            for human_input in human_inputs:
-                if human_input.input_type == "comment":
-                    human_input_messages.append(human_input.content)
-                    self.db.mark_input_consumed(human_input.id, datetime.now())
-                elif human_input.input_type == "pause":
-                    print("⏸️  Pausing run (human requested)")
-                    self.db.update_run_status(run_id, "paused", datetime.now())
-                    return "paused"
-                elif human_input.input_type == "abort":
-                    print("🛑 Aborting run (human requested)")
-                    self.db.update_run_status(run_id, "aborted", datetime.now())
-                    return "aborted"
+            # Handle human inputs
+            exit_status, human_messages = self._handle_human_inputs(run_id)
+            if exit_status:
+                return exit_status
 
             # Create iteration record
-            iteration = Iteration(
-                id=None,
-                run_id=run_id,
-                number=iteration_number,
-                intent="",  # Will be updated by planner
-                outcome="",  # Will be updated by verifier
-                started_at=datetime.now()
-            )
-            iteration = self.db.create_iteration(iteration)
-            iteration_id = iteration.id
-
-            # ===== PLANNER =====
-            print("🧠 Running Planner...")
-            try:
-                planner_result = await run_planner(
-                    spec_content=self.spec_content,
-                    last_executor_summary=last_executor_summary,
-                    last_verifier_assessment=last_verifier_assessment,
-                    last_specialist_feedback=last_specialist_feedback,
-                    human_inputs=human_input_messages if human_input_messages else None,
-                    memory=memory,
-                    project_id=self.project_context.project_id
-                )
-            except Exception as e:
-                print(f"   ❌ Planner error: {e}")
-                self.db.update_iteration(iteration_id, "STUCK", datetime.now())
-                self.db.update_run_status(run_id, "stuck", datetime.now())
-                self._write_summary(run_id)
-                return "stuck"
-
-            intent = planner_result["intent"]
-            decision = planner_result["decision"]
-            print(f"   Decision: {decision['decision']} - {decision['reason']}")
-            print(f"   Intent: {intent}\n")
-
-            # Update iteration with intent
-            self.db.conn.execute(
-                "UPDATE iterations SET intent = ? WHERE id = ?",
-                (intent, iteration_id)
-            )
-            self.db.conn.commit()
-
-            # Save planner output
-            planner_output_path = self._save_agent_messages(
-                iteration_id, "planner", planner_result["messages"]
-            )
-            self.db.create_agent_output(AgentOutput(
-                id=None,
-                iteration_id=iteration_id,
-                agent_type="planner",
-                raw_output_path=planner_output_path,
-                summary=intent
+            iteration = self.db.create_iteration(Iteration(
+                id=None, run_id=run_id, number=iteration_number,
+                intent="", outcome="", started_at=datetime.now()
             ))
 
-            # Re-read memory in case planner updated it
+            # Create iteration context
+            ctx = IterationContext(
+                run_id=run_id, iteration_id=iteration.id, iteration_number=iteration_number,
+                intent="", memory=memory, last_executor_summary=last_exec,
+                last_verifier_assessment=last_verify, last_specialist_feedback=last_spec
+            )
+
+            # Run planner phase
+            success, early_exit = await self._run_planner_phase(ctx, human_messages)
+            if not success:
+                return early_exit
             memory = read_memory(self.project_context.project_id)
 
-            # ===== CHECK IF PLANNER DECIDED TO STOP =====
-            # If Planner decided DONE or STUCK, skip Executors and Feedback Generators
-            if decision['decision'] in ('DONE', 'STUCK'):
-                print(f"   Planner decided {decision['decision']}, skipping executor and feedback phases")
+            # Run executor phase
+            last_exec = await self._run_executor_phase(ctx)
 
-                # Update iteration outcome
-                self.db.update_iteration(iteration_id, decision['decision'], datetime.now())
+            # Run feedback phase
+            last_verify, last_spec = await self._run_feedback_phase(ctx)
+            self.db.update_iteration(ctx.iteration_id, "CONTINUE", datetime.now())
 
-                # Handle termination
-                if decision['decision'] == "DONE":
-                    print("\n✅ Planner decided: DONE - Spec satisfied!")
-                    print(f"   Reason: {decision['reason']}")
-                    self.db.update_run_status(run_id, "completed", datetime.now())
-                    self._write_summary(run_id)
-                    return "completed"
-                else:  # STUCK
-                    print("\n⚠️  Planner decided: STUCK - Cannot make progress")
-                    print(f"   Reason: {decision['reason']}")
-                    if decision.get('blocker'):
-                        print(f"   Blocker: {decision['blocker']}")
-                    self.db.update_run_status(run_id, "stuck", datetime.now())
-                    self._write_summary(run_id)
-                    return "stuck"
-
-            # ===== EXECUTOR(S) =====
-            # Check if planner provided an ITERATION_PLAN for parallel execution
-            iteration_plan = planner_result.get("iteration_plan")
-
-            if iteration_plan and iteration_plan.get("work_items"):
-                # Parallel execution mode
-                work_items = iteration_plan["work_items"]
-                print(f"⚙️  Running {len(work_items)} Executors in parallel...")
-
-                # Create tasks for each executor
-                executor_tasks = []
-                for work_item in work_items:
-                    task = run_executor(
-                        iteration_intent=intent,
-                        spec_content=self.spec_content,
-                        memory=memory,
-                        work_item_id=work_item["work_item_id"]
-                    )
-                    executor_tasks.append(task)
-
-                # Run all executors in parallel
-                executor_results = await asyncio.gather(*executor_tasks, return_exceptions=True)
-
-                # Process results
-                all_summaries = []
-                for i, result in enumerate(executor_results):
-                    work_item_id = work_items[i]["work_item_id"]
-
-                    if isinstance(result, Exception):
-                        print(f"   ❌ Executor {i+1} ({work_item_id}) error: {result}")
-                        result = {
-                            "status": "Blocked",
-                            "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Agent crashed with error\nBlockers: {result}\nNotes: Executor agent encountered an error and could not complete",
-                            "full_output": str(result),
-                            "messages": []
-                        }
-
-                    status = result["status"]
-                    summary = result["summary"]
-                    print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
-
-                    # Save executor output
-                    executor_output_path = self._save_agent_messages(
-                        iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
-                    )
-                    self.db.create_agent_output(AgentOutput(
-                        id=None,
-                        iteration_id=iteration_id,
-                        agent_type=f"executor_{i+1}",
-                        raw_output_path=executor_output_path,
-                        summary=summary
-                    ))
-
-                    all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
-
-                # Combine all summaries for feedback
-                last_executor_summary = "\n\n".join(all_summaries)
-                print()
-
-            else:
-                # Single executor mode (fallback)
-                print("⚙️  Running Executor...")
-                try:
-                    executor_result = await run_executor(
-                        iteration_intent=intent,
-                        spec_content=self.spec_content,
-                        memory=memory
-                    )
-                except Exception as e:
-                    print(f"   ❌ Executor error: {e}")
-                    # Save what we have and continue - let verifier assess the situation
-                    executor_result = {
-                        "status": "Blocked",
-                        "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Agent crashed with error\nBlockers: {e}\nNotes: Executor agent encountered an error and could not complete",
-                        "full_output": str(e),
-                        "messages": []
-                    }
-
-                status = executor_result["status"]
-                summary = executor_result["summary"]
-                print(f"   Status: {status}")
-                print(f"   Summary: {summary[:200]}...\n" if len(summary) > 200 else f"   Summary: {summary}\n")
-
-                # Save executor output
-                executor_output_path = self._save_agent_messages(
-                    iteration_id, "executor", executor_result["messages"]
-                )
-                self.db.create_agent_output(AgentOutput(
-                    id=None,
-                    iteration_id=iteration_id,
-                    agent_type="executor",
-                    raw_output_path=executor_output_path,
-                    summary=summary
-                ))
-
-                last_executor_summary = summary
-
-            # ===== FEEDBACK GENERATORS (Verifier + Specialists) =====
-            print("🔍 Running Feedback Generators (Verifier + Specialists)...")
-
-            # Create list of specialists to run
-            specialists = [
-                CodeReviewerSpecialist(),
-            ]
-
-            # Run Verifier and all Specialists in parallel
-            feedback_tasks = []
-
-            # Add Verifier task
-            feedback_tasks.append(run_verifier(
-                spec_content=self.spec_content,
-                memory=memory,
-                root_work_item_id=self.root_work_item_id
-            ))
-
-            # Add Specialist tasks
-            for specialist in specialists:
-                feedback_tasks.append(run_specialist(
-                    specialist=specialist,
-                    spec_content=self.spec_content,
-                    memory=memory
-                ))
-
-            # Gather all feedback in parallel
-            feedback_results = await asyncio.gather(*feedback_tasks, return_exceptions=True)
-
-            # Process Verifier result (first result)
-            verifier_result = feedback_results[0]
-            if isinstance(verifier_result, Exception):
-                print(f"   ❌ Verifier error: {verifier_result}")
-                verifier_result = {
-                    "outcome": "CONTINUE",
-                    "assessment": f"VERIFIER_ASSESSMENT:\nOutcome: CONTINUE\nReasoning: Verifier agent crashed with error: {verifier_result}\nGaps: Unable to verify - agent error",
-                    "full_output": str(verifier_result),
-                    "messages": []
-                }
-
-            outcome = verifier_result["outcome"]
-            assessment = verifier_result["assessment"]
-            print(f"   Verifier Outcome: {outcome}")
-            print(f"   Assessment: {assessment[:200]}...\n" if len(assessment) > 200 else f"   Assessment: {assessment}\n")
-
-            # Save verifier output
-            verifier_output_path = self._save_agent_messages(
-                iteration_id, "verifier", verifier_result["messages"]
-            )
-            self.db.create_agent_output(AgentOutput(
-                id=None,
-                iteration_id=iteration_id,
-                agent_type="verifier",
-                raw_output_path=verifier_output_path,
-                summary=assessment
-            ))
-
-            last_verifier_assessment = assessment
-
-            # Process Specialist results
-            specialist_feedback_summary = []
-            for i, result in enumerate(feedback_results[1:], start=1):
-                specialist = specialists[i-1]
-
-                if isinstance(result, Exception):
-                    print(f"   ❌ {specialist.name} error: {result}")
-                    result = {
-                        "specialist_name": specialist.name,
-                        "error": str(result),
-                        "feedback": [],
-                        "full_output": "",
-                        "messages": []
-                    }
-
-                specialist_name = result["specialist_name"]
-                feedback_items = result.get("feedback", [])
-                print(f"   {specialist_name}: {len(feedback_items)} feedback items")
-
-                # Convert feedback items to Trace work items (if root work item exists)
-                if feedback_items and self.root_work_item_id:
-                    try:
-                        created_ids = create_work_items_from_feedback(
-                            feedback_items=feedback_items,
-                            specialist_name=specialist_name,
-                            root_work_item_id=self.root_work_item_id,
-                            project_root=str(self.project_context.project_root)
-                        )
-                        if created_ids:
-                            print(f"   → Created {len(created_ids)} work items from {specialist_name} feedback")
-                    except Exception as e:
-                        print(f"   ⚠️  Warning: Could not create work items from {specialist_name} feedback: {e}")
-
-                # Save specialist output
-                specialist_output_path = self._save_agent_messages(
-                    iteration_id, specialist_name, result.get("messages", [])
-                )
-
-                # Create summary of feedback
-                feedback_summary = f"{specialist_name} feedback:\n"
-                if feedback_items:
-                    feedback_summary += "\n".join(f"  - {item}" for item in feedback_items)
-                else:
-                    feedback_summary += "  No issues found"
-
-                self.db.create_agent_output(AgentOutput(
-                    id=None,
-                    iteration_id=iteration_id,
-                    agent_type=specialist_name,
-                    raw_output_path=specialist_output_path,
-                    summary=feedback_summary
-                ))
-
-                specialist_feedback_summary.append(feedback_summary)
-
-            # Combine all specialist feedback for next Planner iteration
-            last_specialist_feedback = "\n\n".join(specialist_feedback_summary) if specialist_feedback_summary else "No specialist feedback"
-            print()
-
-            # Update iteration with Verifier outcome (for historical record)
-            self.db.update_iteration(iteration_id, outcome, datetime.now())
-
-            # ===== CHECK PLANNER'S DECISION =====
-            planner_decision = decision['decision']
-
-            if planner_decision == "DONE":
-                print("\n✅ Planner decided: DONE - Spec satisfied!")
-                print(f"   Reason: {decision['reason']}")
-                self.db.update_run_status(run_id, "completed", datetime.now())
-                self._write_summary(run_id)
-                return "completed"
-
-            elif planner_decision == "STUCK":
-                print("\n⚠️  Planner decided: STUCK - Cannot make progress")
-                print(f"   Reason: {decision['reason']}")
-                if decision.get('blocker'):
-                    print(f"   Blocker: {decision['blocker']}")
-                self.db.update_run_status(run_id, "stuck", datetime.now())
-                self._write_summary(run_id)
-                return "stuck"
-
-            # planner_decision == "CONTINUE" - loop continues
+            # Check if planner wants to stop
+            final_status = self._check_planner_decision(ctx)
+            if final_status:
+                return final_status
             print(f"   Continuing to next iteration...")
 
-        # Max iterations reached
         print(f"\n⏱️  Max iterations ({max_iterations}) reached.")
         self.db.update_run_status(run_id, "max_iterations", datetime.now())
         self._write_summary(run_id)
         return "max_iterations"
+
+    def _initialize_run(self, max_iterations: int) -> Tuple[str, int, Optional[str], Optional[str], Optional[str]]:
+        """Initialize or resume a run. Returns (run_id, iteration_number, last_exec, last_verify, last_spec)."""
+        existing_run = self.db.get_latest_run()
+
+        if existing_run and existing_run.status == "running":
+            return self._resume_run(existing_run, max_iterations)
+        else:
+            return self._create_new_run(max_iterations)
+
+    def _resume_run(self, run: Run, max_iterations: int) -> Tuple[str, int, Optional[str], Optional[str], Optional[str]]:
+        """Resume an interrupted run."""
+        run.config["max_iterations"] = max_iterations
+        print(f"♻️  Resuming interrupted Ralph2 run: {run.id}\n📋 Spec: {self.spec_path}")
+        print(f"🧹 Cleaning up abandoned work from interruption...")
+        self._cleanup_abandoned_branches()
+        print()
+
+        last_iteration = self.db.get_latest_iteration(run.id)
+        iteration_number = last_iteration.number if last_iteration else 0
+        print(f"   Resuming from iteration {iteration_number + 1}\n")
+
+        last_exec, last_verify, last_spec = None, None, None
+        if last_iteration:
+            last_exec, last_verify, last_spec = self._get_last_outputs(last_iteration.id)
+
+        return run.id, iteration_number, last_exec, last_verify, last_spec
+
+    def _create_new_run(self, max_iterations: int) -> Tuple[str, int, Optional[str], Optional[str], Optional[str]]:
+        """Create a new run."""
+        run_id = f"ralph2-{uuid.uuid4().hex[:8]}"
+        run = Run(
+            id=run_id, spec_path=self.spec_path, spec_content=self.spec_content,
+            status="running", config={"max_iterations": max_iterations}, started_at=datetime.now()
+        )
+        self.db.create_run(run)
+        print(f"🚀 Starting Ralph2 run: {run_id}\n📋 Spec: {self.spec_path}\n")
+        return run_id, 0, None, None, None
+
+    def _get_last_outputs(self, iteration_id: int) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Extract last outputs from an iteration."""
+        outputs = self.db.get_agent_outputs(iteration_id)
+        last_exec, last_verify, last_spec = None, None, None
+
+        for output in outputs:
+            if output.agent_type.startswith("executor"):
+                last_exec = output.summary if last_exec is None else f"{last_exec}\n\n{output.summary}"
+            elif output.agent_type == "verifier":
+                last_verify = output.summary
+            elif "specialist" in output.agent_type.lower() or "reviewer" in output.agent_type.lower():
+                last_spec = output.summary if last_spec is None else f"{last_spec}\n\n{output.summary}"
+
+        return last_exec, last_verify, last_spec
+
+    def _setup_root_work_item(self, run_id: str) -> Optional[str]:
+        """Setup root work item. Returns early exit status if failed."""
+        try:
+            root_work_item_id = self._ensure_root_work_item()
+            current_run = self.db.get_run(run_id)
+            if current_run and not current_run.root_work_item_id:
+                self.db.update_run_root_work_item(run_id, root_work_item_id)
+            return None
+        except RuntimeError as e:
+            print(f"   ❌ Error setting up root work item: {e}")
+            self.db.update_run_status(run_id, "stuck", datetime.now())
+            return "stuck"
 
     def _write_summary(self, run_id: str):
         """Write a summary of the run to a file."""

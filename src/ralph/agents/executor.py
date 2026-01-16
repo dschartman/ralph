@@ -6,6 +6,8 @@ from typing import Optional
 from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
 
+from ralph2.constants import EXECUTOR_SUMMARY_MARKER
+
 
 EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Ralph multi-agent system.
 
@@ -215,8 +217,8 @@ async def run_executor(
     # Extract the summary and status from the full output
     full_text = "\n".join(full_output)
 
-    # Look for EXECUTOR_SUMMARY in the output
-    summary_start = full_text.find("EXECUTOR_SUMMARY:")
+    # Look for EXECUTOR_SUMMARY in the output using the constant
+    summary_start = full_text.find(EXECUTOR_SUMMARY_MARKER)
     efficiency_notes = None
 
     if summary_start != -1:
@@ -239,8 +241,8 @@ async def run_executor(
                 if efficiency_notes == "None":
                     efficiency_notes = None
     else:
-        # Fallback: create a summary
-        summary = "EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work completed\n"
+        # Fallback: create a summary using the constant
+        summary = f"{EXECUTOR_SUMMARY_MARKER}\nStatus: Completed\nWhat was done: Work completed\n"
 
     return {
         "status": status,

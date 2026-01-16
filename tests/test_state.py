@@ -1286,3 +1286,186 @@ class TestResumability:
         # Verify it's no longer unconsumed
         still_unconsumed = temp_db.get_unconsumed_inputs(run.id)
         assert len(still_unconsumed) == 0
+
+
+class TestTransactionBoundaries:
+    """Test that database operations support transaction boundaries."""
+
+    def test_transaction_context_manager_commits_on_success(self, temp_db, sample_run):
+        """Test that transaction context manager commits on success."""
+        # Start a transaction and perform multiple operations
+        with temp_db.transaction():
+            temp_db.create_run(sample_run)
+            iteration = Iteration(
+                id=None,
+                run_id=sample_run.id,
+                number=1,
+                intent="Test iteration",
+                outcome="continue",
+                started_at=datetime(2024, 1, 15, 10, 30, 0)
+            )
+            temp_db.create_iteration(iteration)
+
+        # Verify both operations persisted
+        retrieved_run = temp_db.get_run(sample_run.id)
+        assert retrieved_run is not None
+
+        iterations = temp_db.list_iterations(sample_run.id)
+        assert len(iterations) == 1
+
+    def test_transaction_context_manager_rolls_back_on_error(self, temp_db, sample_run):
+        """Test that transaction context manager rolls back on error."""
+        # Create initial run
+        temp_db.create_run(sample_run)
+
+        # Try to perform operations in a transaction that will fail
+        try:
+            with temp_db.transaction():
+                # Update run status
+                temp_db.update_run_status(sample_run.id, "paused")
+
+                # Deliberately cause an error by inserting invalid data
+                cursor = temp_db.conn.cursor()
+                cursor.execute("INSERT INTO runs (id, spec_path) VALUES (?, ?)", ("bad-run", "path"))
+                # This should fail due to NOT NULL constraints on other columns
+        except Exception:
+            pass  # Expected to fail
+
+        # Verify the update was rolled back - status should still be original
+        retrieved_run = temp_db.get_run(sample_run.id)
+        assert retrieved_run.status == "running"  # Original status
+
+    def test_nested_transactions_not_supported_but_safe(self, temp_db, sample_run):
+        """Test that nested transactions handle gracefully (SQLite limitation)."""
+        # SQLite doesn't support nested transactions, but we should handle it gracefully
+        with temp_db.transaction():
+            temp_db.create_run(sample_run)
+
+            # Attempting a nested transaction should work (it will be ignored or use savepoints)
+            with temp_db.transaction():
+                iteration = Iteration(
+                    id=None,
+                    run_id=sample_run.id,
+                    number=1,
+                    intent="Test iteration",
+                    outcome="continue",
+                    started_at=datetime(2024, 1, 15, 10, 30, 0)
+                )
+                temp_db.create_iteration(iteration)
+
+        # Both should have succeeded
+        assert temp_db.get_run(sample_run.id) is not None
+        assert len(temp_db.list_iterations(sample_run.id)) == 1
+
+    def test_manual_transaction_control(self, temp_db, sample_run):
+        """Test manual begin/commit/rollback transaction control."""
+        # Begin transaction manually
+        temp_db.begin_transaction()
+
+        try:
+            temp_db.create_run(sample_run)
+            iteration = Iteration(
+                id=None,
+                run_id=sample_run.id,
+                number=1,
+                intent="Test iteration",
+                outcome="continue",
+                started_at=datetime(2024, 1, 15, 10, 30, 0)
+            )
+            temp_db.create_iteration(iteration)
+
+            # Commit manually
+            temp_db.commit_transaction()
+        except Exception:
+            temp_db.rollback_transaction()
+            raise
+
+        # Verify operations persisted
+        assert temp_db.get_run(sample_run.id) is not None
+        assert len(temp_db.list_iterations(sample_run.id)) == 1
+
+    def test_rollback_transaction_manually(self, temp_db, sample_run):
+        """Test manual rollback of transaction."""
+        # Create initial run
+        temp_db.create_run(sample_run)
+
+        # Begin transaction and make changes
+        temp_db.begin_transaction()
+        temp_db.update_run_status(sample_run.id, "paused")
+
+        # Manually roll back
+        temp_db.rollback_transaction()
+
+        # Verify the update was rolled back
+        retrieved_run = temp_db.get_run(sample_run.id)
+        assert retrieved_run.status == "running"  # Original status
+
+    def test_multiple_operations_atomic_via_transaction(self, temp_db):
+        """Test that multiple related operations can be made atomic."""
+        run = Run(
+            id="atomic-test-run",
+            spec_path="Ralphfile",
+            spec_content="# Test",
+            status="running",
+            config={},
+            started_at=datetime(2024, 1, 15, 10, 0, 0)
+        )
+
+        # Perform multiple operations atomically
+        with temp_db.transaction():
+            temp_db.create_run(run)
+
+            # Create multiple iterations
+            for i in range(3):
+                iteration = Iteration(
+                    id=None,
+                    run_id=run.id,
+                    number=i + 1,
+                    intent=f"Iteration {i + 1}",
+                    outcome="continue",
+                    started_at=datetime(2024, 1, 15, 10, i * 15, 0)
+                )
+                created_iter = temp_db.create_iteration(iteration)
+
+                # Create agent output for each iteration
+                output = AgentOutput(
+                    id=None,
+                    iteration_id=created_iter.id,
+                    agent_type="executor",
+                    raw_output_path=f".ralph/outputs/executor_{i+1}.jsonl",
+                    summary=f"Completed iteration {i + 1}"
+                )
+                temp_db.create_agent_output(output)
+
+        # Verify all operations succeeded
+        assert temp_db.get_run(run.id) is not None
+        iterations = temp_db.list_iterations(run.id)
+        assert len(iterations) == 3
+
+        # Check all agent outputs exist
+        for iteration in iterations:
+            outputs = temp_db.get_agent_outputs(iteration.id)
+            assert len(outputs) == 1
+
+    def test_close_on_already_closed_connection_safe(self, temp_db):
+        """Test that closing an already-closed connection doesn't raise an exception."""
+        # Close the connection
+        temp_db.close()
+
+        # Closing again should not raise an exception
+        temp_db.close()  # Should be safe
+
+    def test_close_handles_connection_error_gracefully(self, temp_db):
+        """Test that close() handles underlying connection errors gracefully."""
+        # Force the underlying connection to be in an error state by closing it directly
+        # This simulates an error condition where the connection is corrupt or already closed
+        temp_db.conn.close()
+
+        # Reset _closed flag to simulate scenario where our tracking is incorrect
+        temp_db._closed = False
+
+        # close() should handle the exception gracefully without raising
+        temp_db.close()  # Should not raise
+
+        # Verify the _closed flag is set
+        assert temp_db._closed is True

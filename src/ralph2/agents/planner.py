@@ -1,17 +1,22 @@
 """Planner agent: Maintain plan and decide what to work on next."""
 
 import asyncio
-import re
-from typing import Optional, Dict, List
-from pathlib import Path
+from typing import Optional
 
-from claude_agent_sdk import query, ClaudeAgentOptions
-from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk.types import ResultMessage
+
+from ralph2.agents.models import PlannerResult
+from ralph2.agents.streaming import stream_agent_output
+
+
+# Model to use for all agents
+AGENT_MODEL = "claude-opus-4-5"
 
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner agent in the Ralph2 multi-agent system.
 
-Your ONLY job is to maintain a plan, decide what to work on next, and determine when to continue/stop.
+Your job is to maintain a plan, decide what to work on next, and determine when to continue/stop.
 
 ## Your Responsibilities
 
@@ -23,19 +28,25 @@ Your ONLY job is to maintain a plan, decide what to work on next, and determine 
    - Remove stale/outdated entries
    - Keep memory concise (quick reference, not documentation)
    - Write updated memory back to memory.md
+
 2. Read the spec to understand the goal
+
 3. Review current task state in Trace (trc list, trc show)
+
 4. Review feedback from the last iteration:
    - Executor summary (what was done)
    - Verifier assessment (spec compliance check)
    - Specialist feedback (code quality, maintainability)
+
 5. Update tasks in Trace if needed:
    - Create new tasks if gaps are found (from Verifier or Specialists)
    - Break down tasks that are too large into testable pieces
    - Close tasks that are complete
    - Reprioritize based on what you've learned
+
 6. Make termination decision: CONTINUE, DONE, or STUCK
-7. Output iteration plan and intent
+
+7. Plan iteration work (if CONTINUE)
 
 ## Task Decomposition
 
@@ -86,36 +97,6 @@ Trace uses a 0-4 priority scale that guides your planning decisions:
 
 **Your Discretion**: You have flexibility with Medium (P2) and below. Focus on Critical/High priorities first, then tackle Medium work that moves the spec forward. Low and Backlog items can remain unaddressed—not everything needs to be completed.
 
-**Setting Priorities**: When creating tasks from Verifier/Specialist feedback, assign priorities that reflect urgency and spec impact. Use their assessment to inform your priority decisions.
-
-## Trace Feedback Loop
-
-**We own Trace.** Using Trace to build Ralph2 generates valuable feedback that improves Trace itself.
-
-**Your Responsibility**: Identify and capture Trace-related issues, friction points, and improvement ideas.
-
-**What to Capture**:
-- **Bugs**: CLI errors, incorrect behavior, data inconsistencies
-- **Missing Features**: Capabilities you wish Trace had (batch operations, better filtering, etc.)
-- **Friction Points**: Workflows that are awkward, require too many commands, or lack clarity
-- **Documentation Gaps**: Unclear commands, missing examples, confusing error messages
-
-**How to Capture**:
-When you encounter a Trace issue or have an improvement idea:
-1. Create a work item in the Trace repository: `~/Repos/github/trace`
-2. Use `trc create` with `--project ~/Repos/github/trace`
-3. Categorize with priority: bugs are typically P1, features P2-P3, docs P3
-4. Include context: what you were doing, what went wrong, or what would help
-
-**Example**:
-```bash
-trc create "trc create should validate --description is not empty" \
-  --description "When using trc create without --description value, should show clear error. Currently creates task with empty description which breaks context." \
-  --project ~/Repos/github/trace
-```
-
-This virtuous cycle ensures Trace evolves to better support agent workflows.
-
 ## Project Memory Management
 
 Project memory is accumulated knowledge about how to work efficiently in this project. It persists across iterations and runs.
@@ -133,33 +114,19 @@ Project memory is accumulated knowledge about how to work efficiently in this pr
 - **Concise** — one line, scannable
 - **Durable** — true across iterations, not ephemeral state
 
-**Examples of GOOD entries:**
-```
-- Use UV for packages: `uv run pytest`, `uv add <pkg>` (not pip)
-- Tests live in tests/, run with `uv run pytest -v`
-- State stored in ~/.ralph2/projects/<uuid>/, not local .ralph2/
-- Use Grep tool for code search instead of bash grep
-- trc ready shows unblocked tasks, trc list shows all
-```
-
-**Examples of BAD entries:**
-```
-- The project uses Python  # too obvious
-- I ran 15 bash commands  # logging, not actionable
-- Tests passed  # ephemeral state
-- Task ralph-xyz completed  # Trace's job
-```
-
 **The test:** Would this save an agent 2+ tool calls next iteration? If yes, it's good memory.
 
-**Curation Process:**
-1. Read current memory from `~/.ralph2/projects/<project-id>/memory.md`
-2. Check feedback for "Efficiency Notes:" sections
-3. Add valuable new insights in the same concise format
-4. Remove duplicates (keep the most complete version)
-5. Remove stale/outdated entries
-6. Write updated memory back using Write tool
-7. Note what memory changes you made in your output
+## Milestone Completion
+
+When you decide DONE, you MUST complete the milestone by organizing remaining work:
+
+**Your Milestone Completion Steps:**
+1. Read all open children under the root work item using `trc tree <root-id>`
+2. If no open children exist, skip to step 6
+3. Categorize remaining work into logical groups (max 5 categories)
+4. For each category with items, create a new parent work item
+5. Reparent each open child to its appropriate category parent
+6. Close the root work item using `trc close <root-id>`
 
 ## Termination Decision
 
@@ -186,170 +153,7 @@ After reviewing all feedback, you MUST decide:
 - Can work be done with what we have? → CONTINUE
 - Is the spec satisfied and no critical work remains? → DONE
 - Is every remaining task blocked by external dependencies? → STUCK
-
-## Output Format
-
-End your response with THREE sections in this exact order:
-
-1. **DECISION** - Your termination decision:
-
-DECISION: [CONTINUE | DONE | STUCK]
-Reason: [Brief explanation of the decision]
-Blocker (if STUCK): [What's needed to unblock]
-
-2. **ITERATION_PLAN** - A structured plan listing work items and executor assignments:
-
-ITERATION_PLAN:
-Executor Count: [number of executors needed - typically 1-4]
-Work Items:
-- [work-item-id]: [brief description] (Executor [number])
-- [work-item-id]: [brief description] (Executor [number])
-...
-
-**Note:** If DECISION is DONE or STUCK, you can skip ITERATION_PLAN (no work will be done).
-
-3. **ITERATION_INTENT** - A summary of the iteration:
-
-ITERATION_INTENT: [1-2 sentence description of what should be worked on this iteration, or "No work - [DONE/STUCK]"]
-
-**Guidelines for ITERATION_PLAN:**
-- Each executor gets assigned one work item from Trace
-- Executors run in parallel within the iteration
-- Executor count = number of work items you want to tackle this iteration
-- Use work item IDs from `trc ready` or `trc list`
-- Keep descriptions concise but clear
-- Assign executor numbers sequentially (1, 2, 3, ...)
-
-**Example (CONTINUE):**
-
-DECISION: CONTINUE
-Reason: Verifier found 3 unmet criteria, and we have implementable tasks ready
-
-ITERATION_PLAN:
-Executor Count: 2
-Work Items:
-- ralph-abc123: Implement user authentication (Executor 1)
-- ralph-def456: Create database migrations (Executor 2)
-
-ITERATION_INTENT: Implement authentication and database foundation in parallel
-
-**Example (DONE):**
-
-DECISION: DONE
-Reason: Verifier confirmed all acceptance criteria met, all critical tasks complete
-
-ITERATION_INTENT: No work - spec is satisfied
-
-**Example (STUCK):**
-
-DECISION: STUCK
-Reason: All remaining work requires ANTHROPIC_API_KEY for agent behavioral testing
-Blocker: Need ANTHROPIC_API_KEY environment variable set for Claude API access
-
-ITERATION_INTENT: No work - blocked on API credentials
 """
-
-
-def parse_decision(text: str) -> Optional[Dict]:
-    """
-    Parse DECISION from planner output text.
-
-    Expected format:
-        DECISION: CONTINUE
-        Reason: Verifier found gaps
-        Blocker (if STUCK): [optional]
-
-    Args:
-        text: The planner output text
-
-    Returns:
-        Dict with keys: decision (str: CONTINUE/DONE/STUCK), reason (str), blocker (Optional[str])
-        Returns None if DECISION not found
-    """
-    # Look for DECISION section
-    decision_match = re.search(r'DECISION:\s*(CONTINUE|DONE|STUCK)', text, re.IGNORECASE)
-    if not decision_match:
-        return None
-
-    decision = decision_match.group(1).upper()
-
-    # Extract reason
-    reason_match = re.search(r'Reason:\s*(.+?)(?=\n(?:Blocker|ITERATION_PLAN|ITERATION_INTENT|$))', text, re.DOTALL)
-    reason = reason_match.group(1).strip() if reason_match else ""
-
-    # Extract blocker (if STUCK)
-    blocker = None
-    if decision == "STUCK":
-        blocker_match = re.search(r'Blocker(?:\s*\(if STUCK\))?:\s*(.+?)(?=\n(?:ITERATION_PLAN|ITERATION_INTENT|$))', text, re.DOTALL)
-        if blocker_match:
-            blocker = blocker_match.group(1).strip()
-
-    return {
-        "decision": decision,
-        "reason": reason,
-        "blocker": blocker,
-    }
-
-
-def parse_iteration_plan(text: str) -> Optional[Dict]:
-    """
-    Parse ITERATION_PLAN from planner output text.
-
-    Expected format:
-        ITERATION_PLAN:
-        Executor Count: 2
-        Work Items:
-        - ralph-abc123: Implement feature X (Executor 1)
-        - ralph-def456: Fix bug Y (Executor 2)
-
-    Args:
-        text: The planner output text
-
-    Returns:
-        Dict with keys: executor_count (int), work_items (list of dicts)
-        Each work item dict has: work_item_id, description, executor_number
-        Returns None if ITERATION_PLAN not found or malformed
-    """
-    # Look for ITERATION_PLAN section
-    plan_match = re.search(r'ITERATION_PLAN:(.*?)(?=ITERATION_INTENT:|$)', text, re.DOTALL)
-    if not plan_match:
-        return None
-
-    plan_text = plan_match.group(1)
-
-    # Extract executor count
-    executor_count_match = re.search(r'Executor Count:\s*(\d+)', plan_text)
-    if not executor_count_match:
-        return None
-
-    try:
-        executor_count = int(executor_count_match.group(1))
-    except ValueError:
-        return None
-
-    # Extract work items
-    # Pattern: - work-item-id: description (Executor N)
-    work_item_pattern = r'-\s+([a-z0-9\-]+):\s*(.+?)\s*\(Executor\s+(\d+)\)'
-    work_items = []
-
-    for match in re.finditer(work_item_pattern, plan_text):
-        work_item_id = match.group(1)
-        description = match.group(2).strip()
-        executor_number = int(match.group(3))
-
-        work_items.append({
-            "work_item_id": work_item_id,
-            "description": description,
-            "executor_number": executor_number
-        })
-
-    if not work_items:
-        return None
-
-    return {
-        "executor_count": executor_count,
-        "work_items": work_items
-    }
 
 
 async def run_planner(
@@ -360,6 +164,7 @@ async def run_planner(
     human_inputs: Optional[list[str]] = None,
     memory: str = "",
     project_id: Optional[str] = None,
+    root_work_item_id: Optional[str] = None,
 ) -> dict:
     """
     Run the Planner agent.
@@ -372,9 +177,10 @@ async def run_planner(
         human_inputs: List of human input messages (if any)
         memory: Project memory content
         project_id: The project UUID (needed for memory file path)
+        root_work_item_id: Root work item ID (spec milestone in Trace)
 
     Returns:
-        dict with keys: 'intent' (str), 'decision' (dict), 'iteration_plan' (dict), 'full_output' (str), 'messages' (list)
+        dict with keys: 'result' (PlannerResult), 'full_output' (str), 'messages' (list)
     """
     # Build the prompt
     prompt_parts = [
@@ -385,6 +191,17 @@ async def run_planner(
         "---",
         "",
     ]
+
+    # Add root work item ID if available
+    if root_work_item_id:
+        prompt_parts.append("# Root Work Item")
+        prompt_parts.append("")
+        prompt_parts.append(f"Root work item ID: `{root_work_item_id}`")
+        prompt_parts.append("")
+        prompt_parts.append("(Use this ID for milestone completion when declaring DONE)")
+        prompt_parts.append("")
+        prompt_parts.append("---")
+        prompt_parts.append("")
 
     # Add memory section (even if empty, so planner knows about memory system)
     prompt_parts.append("# Project Memory")
@@ -451,90 +268,74 @@ async def run_planner(
         "4. Review Verifier assessment and Specialist feedback",
         "5. Update tasks as needed (create, close, update descriptions based on feedback)",
         "6. Make termination decision: CONTINUE, DONE, or STUCK",
-        "7. If CONTINUE, decide what should be worked on in this iteration",
-        "8. End with: DECISION, ITERATION_PLAN (if CONTINUE), and ITERATION_INTENT",
+        "7. If DONE, complete the milestone (organize remaining work, close root)",
+        "8. If CONTINUE, decide what should be worked on in this iteration",
     ])
 
     prompt = "\n".join(prompt_parts)
 
+    # Configure the agent with structured output
+    options = ClaudeAgentOptions(
+        model=AGENT_MODEL,
+        allowed_tools=["Bash", "Read", "Write"],
+        permission_mode="bypassPermissions",
+        system_prompt=PLANNER_SYSTEM_PROMPT,
+        output_format={
+            "type": "json_schema",
+            "schema": PlannerResult.model_json_schema()
+        }
+    )
+
     # Run the planner agent
     full_output = []
     messages = []
-    intent = None
+    result: Optional[PlannerResult] = None
 
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                allowed_tools=["Bash", "Read", "Write"],
-                permission_mode="bypassPermissions",
-                system_prompt=PLANNER_SYSTEM_PROMPT,
-            )
-        ):
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+
+        async for message in client.receive_response():
             # Save raw message
-            messages.append(message.model_dump() if hasattr(message, "model_dump") else str(message))
+            if hasattr(message, "model_dump"):
+                messages.append(message.model_dump())
+            else:
+                messages.append(str(message))
 
-            # Stream output to terminal
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        print(f"\033[36m{block.text}\033[0m")  # Cyan for text
-                        full_output.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_info = f"▶ {block.name}"
-                        if hasattr(block, 'input') and block.input:
-                            if 'command' in block.input:
-                                tool_info += f": {block.input['command'][:80]}"
-                            elif 'file_path' in block.input:
-                                tool_info += f": {block.input['file_path']}"
-                        print(f"\033[33m{tool_info}\033[0m")  # Yellow for tools
-            elif isinstance(message, ToolResultBlock):
-                print(f"\033[32m  ✓\033[0m")  # Green checkmark for results
+            # Stream output to terminal using shared utility
+            stream_agent_output(message, full_output)
 
-            # Look for the result
-            if hasattr(message, "result"):
-                # Extract intent from the result
-                result_text = message.result if isinstance(message.result, str) else str(message.result)
-                full_output.append(result_text)
-    except Exception as e:
-        # Preserve partial output even if SDK throws late exception
-        print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
+            # Check for the final result with structured output
+            if isinstance(message, ResultMessage):
+                if message.structured_output:
+                    # Validate and convert to Pydantic model
+                    result = PlannerResult.model_validate(message.structured_output)
+                    print(f"\033[32m✓ Planner decision: {result.decision}\033[0m")
+                elif message.subtype == "error_max_structured_output_retries":
+                    print(f"\033[31m✗ Failed to get structured output after retries\033[0m")
 
-    # Extract the intent from the full output
     full_text = "\n".join(full_output)
 
-    # Look for ITERATION_INTENT in the output
-    for line in full_text.split("\n"):
-        if line.startswith("ITERATION_INTENT:"):
-            intent = line.replace("ITERATION_INTENT:", "").strip()
-            break
-
-    if not intent:
-        # Fallback: use the last non-empty line
-        lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-        if lines:
-            intent = lines[-1]
-        else:
-            intent = "Continue working on tasks"
-
-    # Parse DECISION and ITERATION_PLAN from the output
-    decision = parse_decision(full_text)
-    iteration_plan = parse_iteration_plan(full_text)
-
-    # Default decision if not found
-    if not decision:
-        decision = {
-            "decision": "CONTINUE",
-            "reason": "No decision found in planner output, defaulting to CONTINUE",
-            "blocker": None,
-        }
+    # If we didn't get a valid result, create a default
+    if result is None:
+        print(f"\033[33mWarning: No structured output received, using default CONTINUE\033[0m")
+        result = PlannerResult(
+            decision="CONTINUE",
+            reason="No structured output received from planner, defaulting to CONTINUE",
+            iteration_intent="Continue working on tasks"
+        )
 
     return {
-        "intent": intent,
-        "decision": decision,
-        "iteration_plan": iteration_plan,
+        "result": result,
         "full_output": full_text,
         "messages": messages,
+        # Legacy fields for backward compatibility
+        "intent": result.iteration_intent,
+        "decision": {
+            "decision": result.decision,
+            "reason": result.reason,
+            "blocker": result.blocker,
+        },
+        "iteration_plan": result.iteration_plan.model_dump() if result.iteration_plan else None,
     }
 
 
@@ -551,9 +352,9 @@ async def main():
     """
 
     result = await run_planner(spec_content=spec)
-    print("Intent:", result["intent"])
-    print("\nFull Output:")
-    print(result["full_output"])
+    print("\nResult:", result["result"])
+    print("\nIntent:", result["intent"])
+    print("\nDecision:", result["decision"])
 
 
 if __name__ == "__main__":

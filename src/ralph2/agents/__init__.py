@@ -4,6 +4,7 @@ from .planner import run_planner
 from .executor import run_executor
 from .verifier import run_verifier
 from .specialist import Specialist, CodeReviewerSpecialist, run_specialist
+from .streaming import stream_agent_output
 
 __all__ = [
     "run_planner",
@@ -12,4 +13,5 @@ __all__ = [
     "Specialist",
     "CodeReviewerSpecialist",
     "run_specialist",
+    "stream_agent_output",
 ]

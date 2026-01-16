@@ -6,6 +6,8 @@ from typing import Optional
 from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
 
+from ralph2.constants import VERIFIER_ASSESSMENT_MARKER
+
 
 VERIFIER_SYSTEM_PROMPT = """You are the Verifier. Your ONE job: determine if the spec is satisfied.
 
@@ -106,8 +108,8 @@ def parse_verifier_output(full_text: str) -> dict:
     assessment = None
     efficiency_notes = None
 
-    # Look for VERIFIER_ASSESSMENT in the output
-    assessment_start = full_text.find("VERIFIER_ASSESSMENT:")
+    # Look for VERIFIER_ASSESSMENT in the output using the constant
+    assessment_start = full_text.find(VERIFIER_ASSESSMENT_MARKER)
 
     if assessment_start != -1:
         assessment = full_text[assessment_start:].strip()
@@ -131,8 +133,8 @@ def parse_verifier_output(full_text: str) -> dict:
                 if efficiency_notes == "None":
                     efficiency_notes = None
     else:
-        # Fallback: create an assessment
-        assessment = "VERIFIER_ASSESSMENT:\nOutcome: CONTINUE\nReasoning: Verification incomplete\n"
+        # Fallback: create an assessment using the constant
+        assessment = f"{VERIFIER_ASSESSMENT_MARKER}\nOutcome: CONTINUE\nReasoning: Verification incomplete\n"
 
     return {
         "outcome": outcome,

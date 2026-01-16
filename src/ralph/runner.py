@@ -13,6 +13,7 @@ from .agents.planner import run_planner
 from .agents.executor import run_executor
 from .agents.verifier import run_verifier
 from .project import ProjectContext, read_memory
+from ralph2.constants import EXECUTOR_SUMMARY_MARKER, VERIFIER_ASSESSMENT_MARKER
 
 
 class RalphRunner:
@@ -183,7 +184,7 @@ class RalphRunner:
                 # Save what we have and continue - let verifier assess the situation
                 executor_result = {
                     "status": "Blocked",
-                    "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Agent crashed with error\nBlockers: {e}\nNotes: Executor agent encountered an error and could not complete",
+                    "summary": f"{EXECUTOR_SUMMARY_MARKER}\nStatus: Blocked\nWhat was done: Agent crashed with error\nBlockers: {e}\nNotes: Executor agent encountered an error and could not complete",
                     "full_output": str(e),
                     "messages": []
                 }
@@ -219,7 +220,7 @@ class RalphRunner:
                 # Default to CONTINUE so the loop can retry
                 verifier_result = {
                     "outcome": "CONTINUE",
-                    "assessment": f"VERIFIER_ASSESSMENT:\nOutcome: CONTINUE\nReasoning: Verifier agent crashed with error: {e}\nGaps: Unable to verify - agent error",
+                    "assessment": f"{VERIFIER_ASSESSMENT_MARKER}\nOutcome: CONTINUE\nReasoning: Verifier agent crashed with error: {e}\nGaps: Unable to verify - agent error",
                     "full_output": str(e),
                     "messages": []
                 }

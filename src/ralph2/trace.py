@@ -115,10 +115,20 @@ class TraceClient:
 
         Returns:
             Task object or None if not found
+
+        Note:
+            For "not found" errors, returns None silently.
+            For other errors, logs a warning and returns None.
         """
         try:
             output = self._run_command(["show", task_id])
-        except RuntimeError:
+        except RuntimeError as e:
+            error_msg = str(e).lower()
+            # Check if it's a "not found" error - expected, don't log
+            if "not found" in error_msg or "does not exist" in error_msg:
+                return None
+            # Log warning for unexpected errors (permission denied, connection issues, etc.)
+            print(f"   ⚠️  Warning: Error fetching task {task_id}: {e}")
             return None
 
         # Parse task details

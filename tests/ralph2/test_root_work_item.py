@@ -155,8 +155,13 @@ def test_explicit_root_work_item_id_honored(temp_project):
         check=True
     )
 
-    # Extract work item ID from output
-    manual_work_item_id = result.stdout.strip().split()[-1]
+    # Extract work item ID from output (format: "Created <id>: <title>")
+    # Get last line and extract ID between "Created " and ":"
+    output_line = result.stdout.strip().split('\n')[-1]
+    if output_line.startswith("Created "):
+        manual_work_item_id = output_line.split()[1].rstrip(":")
+    else:
+        manual_work_item_id = output_line.split()[-1]
 
     # Create runner with explicit root work item ID
     runner = Ralph2Runner(

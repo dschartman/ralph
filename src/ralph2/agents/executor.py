@@ -1,150 +1,73 @@
 """Executor agent: Do the assigned work."""
 
 import asyncio
+import os
 import subprocess
 from typing import Optional
 
-from claude_agent_sdk import query, ClaudeAgentOptions
-from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk.types import ResultMessage
+
+from ralph2.agents.models import ExecutorResult
+from ralph2.agents.streaming import stream_agent_output
+from ralph2.git import GitBranchManager
 
 
-def _git_run(command: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
-    """Run a git command and return the result.
-
-    Args:
-        command: Git command as list of strings
-        cwd: Optional working directory for the command
-
-    Returns:
-        CompletedProcess result
-    """
-    return subprocess.run(command, capture_output=True, text=True, cwd=cwd)
+# Model to use for all agents
+AGENT_MODEL = "claude-opus-4-5"
 
 
-def _get_worktree_path(work_item_id: str) -> str:
-    """Get the worktree directory path for a work item.
+EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Ralph2 multi-agent system.
 
-    Args:
-        work_item_id: Work item ID
-
-    Returns:
-        Absolute path to the worktree directory
-    """
-    import os
-    # Create worktree in a sibling directory to the main repo
-    # This ensures parallel executors have isolated filesystems
-    repo_root = os.getcwd()
-    parent_dir = os.path.dirname(repo_root)
-    worktree_path = os.path.join(parent_dir, f"ralph2-executor-{work_item_id}")
-    return worktree_path
-
-
-def _create_worktree(work_item_id: str) -> tuple[bool, str]:
-    """Create a git worktree for the work item with an isolated filesystem.
-
-    Returns:
-        (success, worktree_path or error_message)
-    """
-    branch_name = f"ralph2/{work_item_id}"
-    worktree_path = _get_worktree_path(work_item_id)
-
-    # Create the branch first (from current HEAD)
-    result = _git_run(["git", "branch", branch_name])
-    if result.returncode != 0:
-        return False, f"Failed to create branch: {result.stderr}"
-
-    # Create worktree for the branch
-    result = _git_run(["git", "worktree", "add", worktree_path, branch_name])
-    if result.returncode != 0:
-        # Cleanup branch if worktree creation failed
-        _git_run(["git", "branch", "-D", branch_name])
-        return False, f"Failed to create worktree: {result.stderr}"
-
-    return True, worktree_path
-
-
-def _merge_to_main(work_item_id: str) -> tuple[bool, str]:
-    """Merge feature branch to main.
-
-    This runs in the main repository (not the worktree).
-
-    Returns:
-        (success, error_message)
-    """
-    branch_name = f"ralph2/{work_item_id}"
-
-    # We're already in the main repo, just ensure we're on main branch
-    result = _git_run(["git", "checkout", "main"])
-    if result.returncode != 0:
-        return False, f"Failed to checkout main: {result.stderr}"
-
-    # Merge feature branch from the worktree
-    result = _git_run(["git", "merge", branch_name])
-    if result.returncode != 0:
-        # Merge conflict or error - return conflict info for resolution attempt
-        return False, f"Merge conflict: {result.stderr}"
-
-    return True, ""
-
-
-def _check_merge_conflicts() -> tuple[bool, str]:
-    """Check if there are unresolved merge conflicts.
-
-    Returns:
-        (has_conflicts, conflict_info)
-    """
-    # Check git status for conflicts
-    result = _git_run(["git", "status", "--porcelain"])
-    if result.returncode != 0:
-        return True, "Failed to check git status"
-
-    # Look for conflict markers (UU = both modified)
-    lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
-    conflicts = [line for line in lines if line.startswith('UU ') or line.startswith('AA ') or line.startswith('DD ')]
-
-    if conflicts:
-        conflict_files = [line[3:] for line in conflicts]
-        return True, f"Conflicts in: {', '.join(conflict_files)}"
-
-    return False, ""
-
-
-def _cleanup_worktree(work_item_id: str) -> bool:
-    """Remove the worktree and delete the feature branch.
-
-    Returns:
-        True if successful, False otherwise
-    """
-    branch_name = f"ralph2/{work_item_id}"
-    worktree_path = _get_worktree_path(work_item_id)
-
-    # Remove the worktree
-    result = _git_run(["git", "worktree", "remove", worktree_path, "--force"])
-    worktree_removed = result.returncode == 0
-
-    # Delete the branch
-    result = _git_run(["git", "branch", "-D", branch_name])
-    branch_deleted = result.returncode == 0
-
-    return worktree_removed and branch_deleted
-
-
-EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Temper multi-agent system.
-
-Your ONLY job is to do the work assigned to you by the Planner.
+Your job is to do the work assigned to you by the Planner.
 
 ## Your Responsibilities
 
 1. Read the iteration intent to understand what you should work on
-2. Read task details from Trace (trc show <id>) as needed
+2. Read task details from Trace (`trc show <id>`) as needed
 3. Do the work using the appropriate approach:
    - **Code work**: Write a failing test first, then make it pass
    - **Non-code work** (docs, research, configs): Do directly
-4. Leave comments on tasks in Trace when:
-   - You complete work on a task
-   - You discover something important
-   - You encounter a blocker
-5. Note what you learned and any blockers
+4. Keep Trace updated as you work (comments, subtasks, status)
+5. Commit your work to the branch before finishing
+
+## Using Trace for Work Tracking
+
+Use Trace (not TodoWrite) for all work tracking. Trace persists across sessions and commits to git.
+
+**Core workflow:**
+```bash
+trc show <id>          # Get task details with description and comments
+trc comment <id> "message" --source executor  # Leave progress comments
+trc create "subtask" --description "details" --parent <id>  # Break down work
+trc close <id>         # Mark complete when fully finished
+```
+
+**When to leave comments:**
+- When you start working on a task
+- When you complete significant progress
+- When you discover something important
+- When you encounter a blocker
+
+**When to create subtasks:**
+- When work naturally breaks into distinct pieces
+- When you discover additional work needed
+- Use `--parent <id>` to link to the main task
+
+**Key rules:**
+- Always include `--source executor` when commenting
+- `--description` is required when creating tasks (preserves context)
+- Comments persist and are visible to the Planner
+- Be specific about what you did and learned
+
+## Committing Your Work
+
+You are working in a git branch. Before finishing:
+
+1. Stage your changes: `git add -A`
+2. Commit with a meaningful message: `git commit -m "description of changes"`
+
+Your work will be merged to main after you complete. Uncommitted changes will be lost.
 
 ## Test-Driven Development
 
@@ -160,7 +83,6 @@ When NOT to write tests:
 - Documentation or README updates
 - Research, analysis, or recommendations
 - Configuration changes
-- One-off scripts explicitly marked as disposable
 
 If unsure whether something needs a test: if it has behavior that can break, test it.
 
@@ -168,52 +90,7 @@ If unsure whether something needs a test: if it has behavior that can break, tes
 
 - You DO NOT decide what to work on (the Planner does that)
 - You DO NOT judge if the spec is satisfied (the Verifier does that)
-- You DO the work: read, edit, test, comment
-
-## Trace Commands for Executor
-
-Use these commands via Bash to work with tasks:
-
-**Viewing Tasks:**
-- `trc show <id>` — Get task details including description and comments
-
-**Leaving Comments:**
-- `trc comment <id> "message" --source executor` — Leave a comment on a task
-
-**When to Leave Comments:**
-- After completing work on a task (what was done, any issues encountered)
-- When you discover something important (unexpected behavior, missing dependencies, etc.)
-- When you encounter a blocker (what's blocking you, what's needed to proceed)
-
-**Closing Tasks:**
-- `trc close <id>` — Mark a task as complete (only when fully finished)
-
-**Key Rules:**
-- Comments persist across iterations and are visible to the Planner
-- Use comments to preserve context about your work
-- Be specific about what you did and what you learned
-- Always include `--source executor` when commenting
-
-## Trace Feedback Loop
-
-**We own Trace.** Report any Trace CLI issues or improvement ideas you encounter.
-
-**What to Report in Efficiency Notes**:
-- **Bugs**: Commands that error, produce incorrect output, or behave unexpectedly
-- **Missing Features**: Operations you wished existed (e.g., "wish I could filter tasks by multiple criteria")
-- **Friction Points**: Workflows requiring too many steps or unclear command options
-- **Documentation Gaps**: Unclear error messages, missing help text, confusing behavior
-
-**How to Report**:
-Include Trace feedback in your Efficiency Notes section. The Planner will create work items in the Trace repository (`~/Repos/github/trace`) based on your reports.
-
-**Example Efficiency Note**:
-```
-Efficiency Notes: Trace CLI - running `trc show` on 5 tasks required 5 separate commands.
-Would be more efficient with `trc show <id1> <id2> <id3>` batch support.
-```
-
-This feedback loop ensures Trace improves to better support agent workflows.
+- You DO the work: read, edit, test, comment, commit
 
 ## Recognizing Verification Boundaries
 
@@ -227,37 +104,209 @@ Some work requires real external systems to verify (behavior).
 **Behavioral work** (requires real systems to verify):
 - Agent decision-making, classification accuracy
 - LLM judgment calls, response quality
-- These need real API credentials and test environments
 
 When you complete infrastructure but cannot verify behavior:
 - Report Status: **Blocked** (not Completed)
 - Document exactly what resources are needed for behavioral verification
-- This is correct and expected—not a failure
 
-Example: "Infrastructure complete. Behavioral verification requires ANTHROPIC_API_KEY
-and test Slack workspace. Tests written but skipped until credentials provided."
+## Before You Finish
+
+Before reporting your final status, verify:
+1. **Traces updated**: All relevant tasks have comments documenting your work
+2. **Work committed**: All changes are committed to the branch (`git status` shows clean)
+
+Your structured output will ask you to confirm both of these.
 
 ## Valid Exit Conditions
 
-You should stop when ANY of these is true:
-- **Completed**: You finished the assigned work AND it can be verified with available resources
-- **Blocked**: You can't proceed—missing dependency, unclear requirement, OR behavioral verification needs external resources
-- **Uncertain**: You're not sure if your approach is correct and need guidance
+- **Completed**: Work finished, tests pass, changes committed, traces updated
+- **Blocked**: Can't proceed—missing dependency, unclear requirement, or external blocker
+- **Uncertain**: Not sure if approach is correct, need guidance
 
-All three are valid and useful outcomes. Don't force completion.
-Blocked for external dependencies is expected and correct—document what's needed.
-
-## Output Format
-
-End your response with a clear summary:
-
-EXECUTOR_SUMMARY:
-Status: [Completed | Blocked | Uncertain]
-What was done: [brief description]
-Blockers: [if any]
-Notes: [anything learned or worth mentioning]
-Efficiency Notes: [Insights that would save time in future iterations, or "None"]
+All three are valid outcomes. Don't force completion.
 """
+
+
+async def _run_executor_agent(
+    prompt: str,
+    options: ClaudeAgentOptions,
+) -> tuple[Optional[ExecutorResult], str, list]:
+    """Run the executor agent and return results.
+
+    Args:
+        prompt: The prompt to send to the agent
+        options: Agent options
+
+    Returns:
+        (result, full_output, messages)
+    """
+    full_output = []
+    messages = []
+    result: Optional[ExecutorResult] = None
+
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+
+        async for message in client.receive_response():
+            # Save raw message
+            if hasattr(message, "model_dump"):
+                messages.append(message.model_dump())
+            else:
+                messages.append(str(message))
+
+            # Stream output to terminal using shared utility
+            stream_agent_output(message, full_output)
+
+            # Check for the final result with structured output
+            if isinstance(message, ResultMessage):
+                if message.structured_output:
+                    # Validate and convert to Pydantic model
+                    result = ExecutorResult.model_validate(message.structured_output)
+                    print(f"\033[32m✓ Executor status: {result.status}\033[0m")
+                elif message.subtype == "error_max_structured_output_retries":
+                    print(f"\033[31m✗ Failed to get structured output after retries\033[0m")
+
+    full_text = "\n".join(full_output)
+    return result, full_text, messages
+
+
+def _check_uncommitted_changes(worktree_path: str) -> bool:
+    """Check if there are uncommitted changes in the worktree.
+
+    Args:
+        worktree_path: Path to the git worktree
+
+    Returns:
+        True if there are uncommitted changes, False if clean or directory doesn't exist
+    """
+    if not os.path.isdir(worktree_path):
+        # Worktree doesn't exist (may be mocked in tests) - assume clean
+        return False
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        # If git status fails, assume clean to avoid blocking
+        return False
+
+
+def _auto_commit_changes(worktree_path: str, message: str) -> bool:
+    """Auto-commit any uncommitted changes in the worktree.
+
+    Args:
+        worktree_path: Path to the git worktree
+        message: Commit message
+
+    Returns:
+        True if commit succeeded, False otherwise
+    """
+    # Stage all changes
+    result = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        return False
+
+    # Commit
+    result = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0
+
+
+async def _verify_and_remediate_commit(
+    result: ExecutorResult,
+    options: ClaudeAgentOptions,
+    worktree_path: str
+) -> ExecutorResult:
+    """Verify work is committed and remediate if not.
+
+    If the executor reported work_committed=False or there are uncommitted changes,
+    prompt the agent to commit, or auto-commit as fallback.
+
+    Args:
+        result: The executor result
+        options: Agent options for follow-up prompts
+        worktree_path: Path to the git worktree
+
+    Returns:
+        Updated ExecutorResult
+    """
+    has_uncommitted = _check_uncommitted_changes(worktree_path)
+
+    # If agent said committed but there are uncommitted changes, log discrepancy
+    if result.work_committed and has_uncommitted:
+        print(f"\033[33m⚠ Agent reported work_committed=True but uncommitted changes found\033[0m")
+
+    # If no uncommitted changes, we're good
+    if not has_uncommitted:
+        if not result.work_committed:
+            # Agent said false but actually there are no changes - update the result
+            print(f"\033[32m✓ Working tree is clean\033[0m")
+        return result
+
+    # There are uncommitted changes - need to handle them
+    print(f"\033[33m⚠ Uncommitted changes detected in worktree\033[0m")
+
+    if not result.work_committed:
+        # Agent honestly reported they didn't commit - prompt them to do so
+        print(f"\033[36m→ Prompting agent to commit changes...\033[0m")
+
+        commit_prompt = """You indicated you haven't committed your work yet.
+
+Please commit your changes now:
+1. Run `git add -A` to stage all changes
+2. Run `git commit -m "your descriptive commit message"` to commit
+
+Your work will be lost if not committed before the worktree is cleaned up."""
+
+        try:
+            commit_result, _, _ = await _run_executor_agent(commit_prompt, options)
+            # Check if changes are now committed
+            if not _check_uncommitted_changes(worktree_path):
+                print(f"\033[32m✓ Agent committed changes successfully\033[0m")
+                return ExecutorResult(
+                    status=result.status,
+                    what_was_done=result.what_was_done,
+                    blockers=result.blockers,
+                    notes=result.notes,
+                    efficiency_notes=result.efficiency_notes,
+                    work_committed=True,
+                    traces_updated=result.traces_updated
+                )
+        except Exception as e:
+            print(f"\033[33mWarning: Commit prompt failed: {e}\033[0m")
+
+    # Fallback: auto-commit
+    print(f"\033[33m→ Auto-committing changes as fallback...\033[0m")
+    commit_message = f"Executor work: {result.what_was_done[:100]}" if result.what_was_done else "Executor work (auto-commit)"
+
+    if _auto_commit_changes(worktree_path, commit_message):
+        print(f"\033[32m✓ Auto-commit successful\033[0m")
+        return ExecutorResult(
+            status=result.status,
+            what_was_done=result.what_was_done,
+            blockers=result.blockers,
+            notes=(result.notes or "") + " [Changes auto-committed]",
+            efficiency_notes=result.efficiency_notes,
+            work_committed=True,
+            traces_updated=result.traces_updated
+        )
+    else:
+        print(f"\033[31m✗ Auto-commit failed - changes may be lost\033[0m")
+        return result
 
 
 async def run_executor(
@@ -265,6 +314,7 @@ async def run_executor(
     spec_content: str,
     memory: str = "",
     work_item_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """
     Run the Executor agent.
@@ -274,9 +324,10 @@ async def run_executor(
         spec_content: The specification content (for reference)
         memory: Project memory content
         work_item_id: Optional work item ID from Trace (for parallel execution)
+        run_id: Optional run ID (required if work_item_id is provided, for worktree path isolation)
 
     Returns:
-        dict with keys: 'status' (str), 'summary' (str), 'full_output' (str), 'efficiency_notes' (Optional[str])
+        dict with keys: 'result' (ExecutorResult), 'full_output' (str), 'messages' (list)
     """
     # Build the prompt
     prompt_parts = [
@@ -316,124 +367,173 @@ async def run_executor(
         "2. Use `trc show <id>` to get details on specific tasks if needed",
         "3. Do the work (read files, make changes, test, etc.)",
         "4. Leave comments on tasks as you work (when available)",
-        "5. End with: EXECUTOR_SUMMARY with status, what was done, blockers, and notes",
     ])
 
     prompt = "\n".join(prompt_parts)
 
-    # Git isolation: Create worktree if work_item_id is provided
-    worktree_path = None
-    original_cwd = None
+    # Configure the agent with structured output
+    options = ClaudeAgentOptions(
+        model=AGENT_MODEL,
+        allowed_tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
+        permission_mode="bypassPermissions",
+        system_prompt=EXECUTOR_SYSTEM_PROMPT,
+        output_format={
+            "type": "json_schema",
+            "schema": ExecutorResult.model_json_schema()
+        }
+    )
 
-    if work_item_id:
-        success, result = _create_worktree(work_item_id)
-        if not success:
-            return {
-                "status": "Blocked",
-                "summary": f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Failed to create git worktree\nBlockers: {result}\nNotes: Cannot proceed without worktree isolation\nEfficiency Notes: None",
-                "full_output": "",
-                "efficiency_notes": None,
-                "messages": [],
-            }
-        worktree_path = result
+    # If no work_item_id, run without git isolation
+    if not work_item_id:
+        return await _run_executor_without_isolation(prompt, options)
 
-        # Change to the worktree directory so the agent works in isolation
-        import os
-        original_cwd = os.getcwd()
-        os.chdir(worktree_path)
+    # Use GitBranchManager for git isolation with guaranteed cleanup
+    # run_id is required for worktree path isolation in parallel execution
+    effective_run_id = run_id or "default"
 
-    # Run the executor agent
-    full_output = []
+    git_manager = GitBranchManager(
+        work_item_id=work_item_id,
+        run_id=effective_run_id,
+        cwd=os.getcwd()
+    )
+
+    return await _run_executor_with_git_isolation(prompt, options, git_manager)
+
+
+async def _run_executor_without_isolation(prompt: str, options: ClaudeAgentOptions) -> dict:
+    """Run executor without git worktree isolation.
+
+    Args:
+        prompt: The prompt to send to the agent
+        options: Agent options
+
+    Returns:
+        dict with executor results
+    """
+    try:
+        result, full_text, messages = await _run_executor_agent(prompt, options)
+    except Exception as e:
+        print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
+        result = None
+        full_text = ""
+        messages = []
+
+    if result is None:
+        print(f"\033[33mWarning: No structured output received, using default Completed\033[0m")
+        result = ExecutorResult(
+            status="Completed",
+            what_was_done="Work completed (no structured output received)",
+            work_committed=False,
+            traces_updated=False
+        )
+
+    return _build_executor_response(result, full_text, messages)
+
+
+async def _run_executor_with_git_isolation(
+    prompt: str,
+    options: ClaudeAgentOptions,
+    git_manager: GitBranchManager
+) -> dict:
+    """Run executor with git worktree isolation using GitBranchManager.
+
+    Uses context manager pattern for guaranteed cleanup.
+
+    Args:
+        prompt: The prompt to send to the agent
+        options: Agent options
+        git_manager: GitBranchManager instance for worktree operations
+
+    Returns:
+        dict with executor results
+    """
+    original_cwd = os.getcwd()
+    result = None
+    full_text = ""
     messages = []
-    status = "Completed"  # Default
-    summary = None
 
     try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                allowed_tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
-                permission_mode="bypassPermissions",
-                system_prompt=EXECUTOR_SYSTEM_PROMPT,
+        # Use context manager for guaranteed cleanup
+        with git_manager:
+            worktree_path = git_manager.worktree_path
+
+            # Change to the worktree directory so the agent works in isolation
+            os.chdir(worktree_path)
+
+            try:
+                result, full_text, messages = await _run_executor_agent(prompt, options)
+            except Exception as e:
+                print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
+                result = None
+                full_text = ""
+                messages = []
+            finally:
+                # Restore working directory before context manager cleanup
+                os.chdir(original_cwd)
+
+            # If we didn't get a valid result, create a default
+            if result is None:
+                print(f"\033[33mWarning: No structured output received, using default Completed\033[0m")
+                result = ExecutorResult(
+                    status="Completed",
+                    what_was_done="Work completed (no structured output received)",
+                    work_committed=False,
+                    traces_updated=False
+                )
+
+            # Verify and remediate work_committed status
+            result = await _verify_and_remediate_commit(
+                result, options, git_manager.worktree_path
             )
-        ):
-            # Save raw message
-            messages.append(message.model_dump() if hasattr(message, "model_dump") else str(message))
 
-            # Stream output to terminal
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        print(f"\033[36m{block.text}\033[0m")  # Cyan for text
-                        full_output.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_info = f"▶ {block.name}"
-                        if hasattr(block, 'input') and block.input:
-                            if 'command' in block.input:
-                                tool_info += f": {block.input['command'][:80]}"
-                            elif 'file_path' in block.input:
-                                tool_info += f": {block.input['file_path']}"
-                        print(f"\033[33m{tool_info}\033[0m")  # Yellow for tools
-            elif isinstance(message, ToolResultBlock):
-                print(f"\033[32m  ✓\033[0m")  # Green checkmark for results
-
-            # Look for the result
-            if hasattr(message, "result"):
-                result_text = message.result if isinstance(message.result, str) else str(message.result)
-                full_output.append(result_text)
-    except Exception as e:
-        # Preserve partial output even if SDK throws late exception
-        print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
-
-    # Extract the summary and status from the full output
-    full_text = "\n".join(full_output)
-
-    # Look for EXECUTOR_SUMMARY in the output
-    summary_start = full_text.find("EXECUTOR_SUMMARY:")
-    efficiency_notes = None
-
-    if summary_start != -1:
-        summary = full_text[summary_start:].strip()
-
-        # Try to extract status and efficiency notes
-        for line in summary.split("\n"):
-            if line.startswith("Status:"):
-                status_text = line.replace("Status:", "").strip()
-                # Extract first word
-                if "Completed" in status_text:
-                    status = "Completed"
-                elif "Blocked" in status_text:
-                    status = "Blocked"
-                elif "Uncertain" in status_text:
-                    status = "Uncertain"
-            elif line.startswith("Efficiency Notes:"):
-                efficiency_notes = line.replace("Efficiency Notes:", "").strip()
-                # Treat explicit "None" as None
-                if efficiency_notes == "None":
-                    efficiency_notes = None
-    else:
-        # Fallback: create a summary
-        summary = "EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work completed\n"
-
-    # Git isolation: Handle merge/cleanup based on status
-    if work_item_id:
-        # First, restore working directory to the main repo
-        if original_cwd:
-            import os
-            os.chdir(original_cwd)
-
-        if status == "Completed":
-            # Attempt to merge to main
-            merge_success, merge_error = _merge_to_main(work_item_id)
-            if merge_success:
-                # Merge succeeded - clean up worktree
-                _cleanup_worktree(work_item_id)
+            # Handle merge/cleanup based on status
+            if result.status == "Completed":
+                result = await _handle_completed_status(result, options, git_manager)
             else:
-                # Merge failed - attempt resolution before abandoning
-                print(f"\033[33m⚠ Merge conflict detected. Attempting resolution...\033[0m")
+                # Status is Blocked or Uncertain - worktree will be cleaned up by context manager
+                result = _handle_non_completed_status(result)
 
-                # Build conflict resolution prompt
-                conflict_prompt = f"""# Merge Conflict Resolution
+    except RuntimeError as e:
+        # GitBranchManager failed to create worktree
+        error_result = ExecutorResult(
+            status="Blocked",
+            what_was_done="Failed to create git worktree",
+            blockers=str(e),
+            notes="Cannot proceed without worktree isolation",
+            work_committed=False,
+            traces_updated=False
+        )
+        return _build_executor_response(error_result, "", [])
+
+    return _build_executor_response(result, full_text, messages)
+
+
+async def _handle_completed_status(
+    result: ExecutorResult,
+    options: ClaudeAgentOptions,
+    git_manager: GitBranchManager
+) -> ExecutorResult:
+    """Handle Completed status: attempt merge and conflict resolution.
+
+    Args:
+        result: The executor result
+        options: Agent options for conflict resolution
+        git_manager: GitBranchManager instance
+
+    Returns:
+        Updated ExecutorResult
+    """
+    merge_success, merge_error = git_manager.merge_to_main()
+
+    if merge_success:
+        # Merge succeeded - cleanup handled by context manager
+        print(f"\033[32m✓ Merged successfully\033[0m")
+        return result
+
+    # Merge failed - attempt resolution
+    print(f"\033[33m⚠ Merge conflict detected. Attempting resolution...\033[0m")
+
+    conflict_prompt = f"""# Merge Conflict Resolution
 
 You attempted to merge your work but encountered a merge conflict:
 
@@ -445,97 +545,87 @@ You attempted to merge your work but encountered a merge conflict:
 2. Resolve the conflicts (edit files to remove conflict markers and fix the code)
 3. Stage the resolved files with `git add <file>`
 4. Complete the merge with `git commit` (it will use the default merge message)
-5. Report status in EXECUTOR_SUMMARY
-
-If you cannot resolve the conflicts, report Status: Blocked with details about why.
 """
 
-                # Invoke agent for conflict resolution
-                conflict_messages = []
-                conflict_output = []
-                resolution_status = "Blocked"  # Default to blocked
+    try:
+        resolution_result, _, _ = await _run_executor_agent(conflict_prompt, options)
+    except Exception as e:
+        print(f"\033[33mWarning: Conflict resolution agent ended with error: {e}\033[0m")
+        resolution_result = None
 
-                try:
-                    async for message in query(
-                        prompt=conflict_prompt,
-                        options=ClaudeAgentOptions(
-                            allowed_tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
-                            permission_mode="bypassPermissions",
-                            system_prompt=EXECUTOR_SYSTEM_PROMPT,
-                        )
-                    ):
-                        conflict_messages.append(message.model_dump() if hasattr(message, "model_dump") else str(message))
+    # Check if conflicts are actually resolved
+    if resolution_result and resolution_result.status == "Completed":
+        has_conflicts, _ = git_manager.check_merge_conflicts()
+        if not has_conflicts:
+            # Conflicts resolved - retry merge
+            merge_success, merge_error = git_manager.merge_to_main()
 
-                        # Stream output
-                        if isinstance(message, AssistantMessage):
-                            for block in message.content:
-                                if isinstance(block, TextBlock):
-                                    print(f"\033[36m{block.text}\033[0m")
-                                    conflict_output.append(block.text)
-                                elif isinstance(block, ToolUseBlock):
-                                    tool_info = f"▶ {block.name}"
-                                    if hasattr(block, 'input') and block.input:
-                                        if 'command' in block.input:
-                                            tool_info += f": {block.input['command'][:80]}"
-                                        elif 'file_path' in block.input:
-                                            tool_info += f": {block.input['file_path']}"
-                                    print(f"\033[33m{tool_info}\033[0m")
-                        elif isinstance(message, ToolResultBlock):
-                            print(f"\033[32m  ✓\033[0m")
+    if merge_success:
+        print(f"\033[32m✓ Merge conflicts resolved and merged successfully\033[0m")
+        return result
+    else:
+        # Resolution failed
+        return ExecutorResult(
+            status="Blocked",
+            what_was_done="Work completed but merge conflict resolution failed",
+            blockers=merge_error,
+            notes="Attempted automatic conflict resolution but failed. Worktree and branch abandoned.",
+            efficiency_notes=result.efficiency_notes,
+            work_committed=result.work_committed,
+            traces_updated=result.traces_updated
+        )
 
-                        if hasattr(message, "result"):
-                            result_text = message.result if isinstance(message.result, str) else str(message.result)
-                            conflict_output.append(result_text)
-                except Exception as e:
-                    print(f"\033[33mWarning: Conflict resolution agent ended with error: {e}\033[0m")
 
-                # Check resolution result
-                conflict_text = "\n".join(conflict_output)
-                resolution_summary_start = conflict_text.find("EXECUTOR_SUMMARY:")
+def _handle_non_completed_status(result: ExecutorResult) -> ExecutorResult:
+    """Handle Blocked or Uncertain status: add abandonment note.
 
-                if resolution_summary_start != -1:
-                    resolution_summary = conflict_text[resolution_summary_start:].strip()
-                    for line in resolution_summary.split("\n"):
-                        if line.startswith("Status:"):
-                            status_text = line.replace("Status:", "").strip()
-                            if "Completed" in status_text:
-                                resolution_status = "Completed"
-                            elif "Blocked" in status_text:
-                                resolution_status = "Blocked"
-                            elif "Uncertain" in status_text:
-                                resolution_status = "Uncertain"
+    Args:
+        result: The executor result
 
-                # If resolution succeeded, retry merge
-                if resolution_status == "Completed":
-                    # Check if conflicts are actually resolved
-                    has_conflicts, conflict_info = _check_merge_conflicts()
-                    if not has_conflicts:
-                        # Conflicts resolved - retry merge
-                        merge_success, merge_error = _merge_to_main(work_item_id)
+    Returns:
+        Updated ExecutorResult with abandonment note
+    """
+    if result.notes:
+        return ExecutorResult(
+            status=result.status,
+            what_was_done=result.what_was_done,
+            blockers=result.blockers,
+            notes=f"{result.notes}. Worktree and branch abandoned due to {result.status} status.",
+            efficiency_notes=result.efficiency_notes,
+            work_committed=result.work_committed,
+            traces_updated=result.traces_updated
+        )
+    else:
+        return ExecutorResult(
+            status=result.status,
+            what_was_done=result.what_was_done,
+            blockers=result.blockers,
+            notes=f"Worktree and branch abandoned due to {result.status} status",
+            efficiency_notes=result.efficiency_notes,
+            work_committed=result.work_committed,
+            traces_updated=result.traces_updated
+        )
 
-                # Final status check
-                if not merge_success:
-                    # Resolution failed - abandon worktree and branch
-                    status = "Blocked"
-                    summary = f"EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Work completed but merge conflict resolution failed\nBlockers: {merge_error}\nNotes: Attempted automatic conflict resolution but failed. Worktree and branch abandoned.\nEfficiency Notes: {efficiency_notes or 'None'}"
-                    _cleanup_worktree(work_item_id)
-                else:
-                    # Resolution succeeded! Clean up worktree
-                    print(f"\033[32m✓ Merge conflicts resolved and merged successfully\033[0m")
-                    _cleanup_worktree(work_item_id)
-        else:
-            # Status is Blocked or Uncertain - abandon the worktree and branch
-            _cleanup_worktree(work_item_id)
-            # Update summary to note branch abandonment
-            if "Efficiency Notes:" not in summary:
-                summary += f"\nNotes: Worktree and branch abandoned due to {status} status"
 
+def _build_executor_response(result: ExecutorResult, full_text: str, messages: list) -> dict:
+    """Build the executor response dictionary.
+
+    Args:
+        result: ExecutorResult
+        full_text: Full agent output
+        messages: Raw messages list
+
+    Returns:
+        dict with executor results and legacy fields
+    """
     return {
-        "status": status,
-        "summary": summary,
+        "result": result,
         "full_output": full_text,
-        "efficiency_notes": efficiency_notes,
         "messages": messages,
+        # Legacy fields for backward compatibility
+        "status": result.status,
+        "summary": f"Status: {result.status}\nWhat was done: {result.what_was_done}\nBlockers: {result.blockers or 'None'}\nNotes: {result.notes or 'None'}\nEfficiency Notes: {result.efficiency_notes or 'None'}",
+        "efficiency_notes": result.efficiency_notes,
     }
 
 
@@ -554,11 +644,8 @@ async def main():
     intent = "Create a hello.py script that prints 'Hello, World!'"
 
     result = await run_executor(iteration_intent=intent, spec_content=spec)
-    print("Status:", result["status"])
-    print("\nSummary:")
-    print(result["summary"])
-    print("\nFull Output:")
-    print(result["full_output"])
+    print("\nResult:", result["result"])
+    print("\nStatus:", result["status"])
 
 
 if __name__ == "__main__":

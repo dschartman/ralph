@@ -34,7 +34,8 @@ def ralph2_runner():
         context.summaries_dir = project_dir / "summaries"
 
         # Provide a test root work item ID to avoid subprocess calls to trc
-        runner = Ralph2Runner(spec_path, context, root_work_item_id="ralph-test-root")
+        # Format must be: word-alphanumeric (single hyphen)
+        runner = Ralph2Runner(spec_path, context, root_work_item_id="ralph-testroot123")
 
         try:
             yield runner
