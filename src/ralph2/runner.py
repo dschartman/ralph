@@ -82,23 +82,24 @@ class Ralph2Runner:
         if self.root_work_item_id:
             return self.root_work_item_id
 
-        # Check if a previous run has a root work item
-        existing_run = self.db.get_latest_run()
-        if existing_run and existing_run.root_work_item_id:
-            # Verify it still exists in Trace
-            try:
-                result = subprocess.run(
-                    ["trc", "show", existing_run.root_work_item_id],
-                    cwd=self.project_context.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
-                if result.returncode == 0:
-                    self.root_work_item_id = existing_run.root_work_item_id
-                    return self.root_work_item_id
-            except Exception as e:
-                print(f"   ⚠️  Warning: Could not verify existing root work item: {e}")
+        # Check if any previous run has a root work item
+        all_runs = self.db.list_runs()
+        for existing_run in all_runs:
+            if existing_run.root_work_item_id:
+                # Verify it still exists in Trace
+                try:
+                    result = subprocess.run(
+                        ["trc", "show", existing_run.root_work_item_id],
+                        cwd=self.project_context.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    if result.returncode == 0:
+                        self.root_work_item_id = existing_run.root_work_item_id
+                        return self.root_work_item_id
+                except Exception as e:
+                    print(f"   ⚠️  Warning: Could not verify existing root work item: {e}")
 
         # Create a new root work item
         spec_title = _extract_spec_title(self.spec_content)
