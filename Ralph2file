@@ -1,0 +1,25 @@
+# Minimal Test Spec for Ralph2
+
+## Target
+
+This is a minimal specification designed to test Ralph2's core functionality end-to-end.
+
+## Context
+
+Ralph2 should be able to recognize and fulfill even the most basic requirements, demonstrating that all agents can coordinate through Trace to accomplish a simple task.
+
+## User Experience
+
+The task is complete when:
+- The file `test-output.txt` exists in the repository root
+- The file contains the text: "Ralph2 is working!"
+
+## Acceptance Criteria
+
+- [ ] File `test-output.txt` exists in repository root
+- [ ] File contains the exact text: "Ralph2 is working!"
+
+## Technical Constraints
+
+- Must use standard file I/O
+- Must commit the file to git

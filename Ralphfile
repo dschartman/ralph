@@ -1,0 +1,194 @@
+# Ralph2: Multi-Agent Orchestration for Spec-Driven Development
+
+## Target
+
+**You are building Ralph2.** The implementation lives in `src/ralph2/`. Do not modify `src/ralph/` (that's Ralph1, which is executing this spec).
+
+## Context
+
+LLMs in agentic loops are stateless within invocations—they can do genuine work but cannot maintain continuity of intention across context boundaries. Ralph2 provides external scaffolding for executive functions the model cannot provide internally, enabling eventual convergence through patient repetition with stable goals.
+
+## User Experience
+
+### CLI Commands
+
+```
+ralph2 run [SPEC]           # Run until DONE or STUCK
+ralph2 status               # Show current run status
+ralph2 history              # Show past runs
+ralph2 input "message"      # Add human input for next iteration
+ralph2 pause                # Pause after current iteration
+ralph2 resume               # Resume a paused run
+ralph2 abort                # Abort after current iteration
+```
+
+### States
+
+- **Running**: Iteration loop is active (Planner → Executors → Feedback Generators → repeat)
+- **Completed**: Planner declared DONE after Verifier confirmed spec is met
+- **Stuck**: No progress possible without external input
+- **Paused**: User requested pause, can be resumed
+- **Aborted**: User requested abort
+
+### Output
+
+- Real-time streaming of agent activity to terminal
+- Run summaries written to `~/.ralph2/projects/<id>/summaries/`
+- Agent outputs stored in queryable format (an agent should be able to efficiently search outputs by iteration, agent type, or content without reading entire files)
+
+---
+
+## Acceptance Criteria
+
+### Core Loop
+
+- [ ] Planner reads spec + feedback + memory, decides what to work on
+- [ ] Planner determines how many Executors are needed for this iteration
+- [ ] Planner assigns each Executor a specific work item from Trace
+- [ ] Executors run in parallel, each on their assigned work item
+- [ ] Feedback Generators (Verifier + Specialists) run in parallel after all Executors complete
+- [ ] Verifier reads spec + codebase only (no iteration context), outputs verdict: spec met or not met, with gaps identified
+- [ ] Planner reads Verifier verdict and all feedback, decides CONTINUE/DONE/STUCK
+- [ ] Loop terminates on DONE (spec satisfied) or STUCK (cannot progress)
+- [ ] Each agent runs as a fresh Claude session with isolated context
+
+### Executor Parallelization
+
+- [ ] Planner outputs ITERATION_PLAN listing work items and executor assignments
+- [ ] Multiple Executors can run concurrently within a single iteration
+- [ ] Each Executor receives: one work item ID, the spec, and project memory
+- [ ] Executors do not coordinate with each other—they work independently
+
+### Executor Git Isolation
+
+- [ ] Each Executor creates a feature branch before starting work (`ralph2/<work-item-id>`)
+- [ ] Executor does all work on their feature branch
+- [ ] On completion, Executor merges their branch back to main
+- [ ] If merge conflicts occur, Executor must resolve them
+- [ ] If Executor cannot resolve conflicts, their work is abandoned
+- [ ] Abandoned work items return to backlog for next iteration
+
+### Executor Issue Resolution
+
+- [ ] Executor encounters issue → Executor must resolve it
+- [ ] If Executor cannot resolve (blocked, uncertain), they report status and their branch is abandoned
+- [ ] Abandoned branches are deleted, work item remains open
+- [ ] Executor only closes work item after successful merge to main
+- [ ] Only successfully merged work counts as progress
+- [ ] Executor outputs EXECUTOR_SUMMARY with: Completed (merged), Blocked (abandoned), Uncertain (abandoned)
+
+### Work Tracking Integration
+
+- [ ] Spec is represented as the root work item in Trace (parent of all other work items)
+- [ ] Work items are children of the root work item
+- [ ] Work items use Trace status values: `open`, `in_progress`, `closed`, `blocked`
+- [ ] Feedback from Verifier and Specialists becomes work items with priority
+- [ ] Planner creates, prioritizes, and closes work items
+- [ ] Executor leaves comments on work items as it works (using `trc comment --source executor`)
+- [ ] Verifier leaves verdict as comment on root work item (using `trc comment --source verifier`)
+
+### Feedback Generators (Verifier + Specialists)
+
+- [ ] All feedback generators run in parallel after Executors complete
+- [ ] Verifier outputs verdict on spec (met/not met + gaps identified)
+- [ ] Specialists write feedback as new work items with priority
+- [ ] All feedback generators are read-only (do not modify codebase)
+- [ ] Specialist configuration is extensible (add new specialists without changing core loop)
+- [ ] Default feedback generators: Verifier (verdict on spec), Code Reviewer (maintainability feedback)
+
+### Learnings System
+
+- [ ] Planner curates learnings at start of each iteration (prunes generic or non-applicable entries)
+- [ ] All agents output efficiency notes ("What do you wish you had known before starting?")
+- [ ] Learnings persist in `~/.ralph2/projects/<id>/memory.md`
+- [ ] Learnings are provided to all agents as context
+
+### Priority Model
+
+- [ ] Work items use Trace's 0-4 priority scale:
+  - Critical (0), High (1): MUST be addressed before declaring DONE
+  - Medium (2): Default priority, addressed at Planner's discretion
+  - Low (3), Backlog (4): MAY be deferred to future work
+- [ ] Priority guides Planner decisions (Planner has discretion)
+- [ ] Remaining work items stay in backlog when spec is complete (not everything gets done)
+
+### Termination States
+
+- [ ] DONE: Verifier confirms spec is met, Planner declares DONE
+- [ ] STUCK: Planner determines no progress possible without external input
+  - Examples: missing credentials, spec ambiguity requiring human clarification, external system access needed
+  - NOT STUCK: transient failures (retry), implementation challenges (try different approach)
+- [ ] CONTINUE: There is implementable work remaining
+- [ ] Planner outputs reason when declaring STUCK (what's needed to unblock)
+
+### Human Interaction
+
+- [ ] `ralph2 input` adds message to next iteration's Planner context
+- [ ] `ralph2 pause` signals graceful pause between iterations
+- [ ] `ralph2 abort` signals graceful abort between iterations
+- [ ] `ralph2 resume` continues a paused run
+
+### State Persistence
+
+- [ ] Run state stored in SQLite at `~/.ralph2/projects/<id>/ralph2.db`
+- [ ] Project ID stored in `.ralph2-id` at repo root (gitignored)
+- [ ] Agent outputs stored in queryable format with iteration number and agent type
+- [ ] Run summaries saved as Markdown
+
+### Agent Failure Handling
+
+- [ ] If an agent crashes or fails to complete, the iteration is considered failed
+- [ ] Failed Executor work: branch is abandoned, work item remains open
+- [ ] On any failure, loop continues from Planner (Planner assesses objective reality)
+- [ ] Planner determines next steps based on codebase state, not failed agent's partial output
+
+### Resumability
+
+- [ ] If a run is interrupted, `ralph2 run` on the same spec resumes from the last completed iteration
+- [ ] In-progress work on feature branches at time of interruption is abandoned
+- [ ] Planner assesses current state (codebase + work tracker) and continues
+
+### Agent Isolation
+
+- [ ] Agents do not read CLAUDE.md or repo-level settings
+- [ ] Agents use SDK defaults (hermetized)
+- [ ] Verifier has no iteration context (only spec vs reality)
+- [ ] Each agent has defined tool access:
+  - Planner: Bash, Read, Write (for memory and work tracker)
+  - Executor: Read, Edit, Write, Bash, Glob, Grep (includes git for branch/merge)
+  - Verifier: Read, Bash, Glob, Grep (read-only verification)
+  - Specialists: Read, Glob, Grep (read-only analysis)
+
+---
+
+## Technical Constraints
+
+- Must use Python 3.11+
+- Must use UV for package management (`uv run`, `uv add`)
+- Must use `claude_agent_sdk` for agent invocation
+- Must use Trace CLI (`trc`) for work tracking
+- State directory: `~/.ralph2/projects/<uuid>/`
+- Project ID file: `.ralph2-id` (gitignored)
+
+---
+
+## Trace Feedback Loop
+
+**We own Trace.** Any issues, difficulties, or ideas for improvements discovered during Ralph2 development should be captured for the Trace product.
+
+- [ ] Planner identifies Trace-related feedback (bugs, missing features, friction points)
+- [ ] Planner creates work items in the Trace repo (`~/Repos/github/trace`) for Trace improvements
+- [ ] Executors report Trace CLI issues or limitations they encounter in their efficiency notes
+- [ ] Trace feedback is categorized: bug fix, feature request, documentation gap
+
+This creates a virtuous cycle: using Trace to build Ralph2 generates feedback that improves Trace.
+
+---
+
+## Assets
+
+- Theory: `docs/understanding-ralph.md`
+- Architecture: `docs/agent-orchestration-model.md`
+- Spec Guide: `docs/high-leverage-spec-guide.md`
+- Testing Strategy: `docs/high-leverage-testing-strategy.md`
+- Starting point: `src/ralph2/` (copy of Ralph1, to be reworked)

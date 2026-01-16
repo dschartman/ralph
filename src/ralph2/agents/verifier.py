@@ -144,6 +144,7 @@ def parse_verifier_output(full_text: str) -> dict:
 async def run_verifier(
     spec_content: str,
     memory: str = "",
+    root_work_item_id: Optional[str] = None,
 ) -> dict:
     """
     Run the Verifier agent.
@@ -151,6 +152,7 @@ async def run_verifier(
     Args:
         spec_content: The specification content
         memory: Project memory content
+        root_work_item_id: Optional root work item ID to post verdict as comment
 
     Returns:
         dict with keys: 'outcome' (str), 'assessment' (str), 'full_output' (str), 'efficiency_notes' (Optional[str])
@@ -230,6 +232,25 @@ async def run_verifier(
     # Extract the assessment and outcome from the full output
     full_text = "\n".join(full_output)
     parsed = parse_verifier_output(full_text)
+
+    # Post verdict as comment on root work item if provided
+    if root_work_item_id:
+        import subprocess
+        comment_text = parsed["assessment"]
+        try:
+            # Use trc comment to post the verdict
+            result = subprocess.run(
+                ["trc", "comment", root_work_item_id, comment_text, "--source", "verifier"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0:
+                print(f"\033[32m✓ Posted verdict to {root_work_item_id}\033[0m")
+            else:
+                print(f"\033[33mWarning: Failed to post verdict comment: {result.stderr}\033[0m")
+        except Exception as e:
+            print(f"\033[33mWarning: Failed to post verdict comment: {e}\033[0m")
 
     return {
         "outcome": parsed["outcome"],

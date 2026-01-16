@@ -5,8 +5,8 @@ import tempfile
 import os
 from pathlib import Path
 from datetime import datetime
-from ralph.state.db import RalphDB
-from ralph.state.models import Run, Iteration, AgentOutput, HumanInput
+from ralph2.state.db import Ralph2DB
+from ralph2.state.models import Run, Iteration, AgentOutput, HumanInput
 
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def temp_db():
     """Create a temporary database for testing."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_ralph.db")
-        db = RalphDB(db_path)
+        db = Ralph2DB(db_path)
         yield db
         db.close()
 
@@ -78,7 +78,7 @@ class TestDatabaseInitialization:
             db_path = os.path.join(tmpdir, "test.db")
             assert not os.path.exists(db_path)
 
-            db = RalphDB(db_path)
+            db = Ralph2DB(db_path)
 
             assert os.path.exists(db_path)
             db.close()
@@ -89,7 +89,7 @@ class TestDatabaseInitialization:
             db_path = os.path.join(tmpdir, "nested", "path", "test.db")
             assert not os.path.exists(os.path.dirname(db_path))
 
-            db = RalphDB(db_path)
+            db = Ralph2DB(db_path)
 
             assert os.path.exists(db_path)
             assert os.path.exists(os.path.dirname(db_path))
@@ -418,6 +418,54 @@ class TestIterationOperations:
         assert iterations[1].number == 2
         assert iterations[2].number == 3
 
+    def test_get_latest_iteration(self, temp_db, sample_run):
+        """Test retrieving the most recent iteration for a run."""
+        temp_db.create_run(sample_run)
+
+        iter1 = Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=1,
+            intent="First iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        )
+        iter2 = Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=2,
+            intent="Second iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 45, 0)
+        )
+        iter3 = Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=3,
+            intent="Third iteration",
+            outcome="done",
+            started_at=datetime(2024, 1, 15, 11, 0, 0)
+        )
+
+        temp_db.create_iteration(iter1)
+        temp_db.create_iteration(iter2)
+        temp_db.create_iteration(iter3)
+
+        latest = temp_db.get_latest_iteration(sample_run.id)
+
+        assert latest is not None
+        assert latest.number == 3
+        assert latest.intent == "Third iteration"
+        assert latest.outcome == "done"
+
+    def test_get_latest_iteration_when_empty(self, temp_db, sample_run):
+        """Test getting latest iteration when no iterations exist."""
+        temp_db.create_run(sample_run)
+
+        latest = temp_db.get_latest_iteration(sample_run.id)
+
+        assert latest is None
+
 
 class TestAgentOutputOperations:
     """Test AgentOutput CRUD operations."""
@@ -656,8 +704,8 @@ class TestDatabaseIsolation:
     def test_multiple_temp_databases_are_isolated(self):
         """Test that multiple temporary databases don't interfere with each other."""
         with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
-            db1 = RalphDB(os.path.join(tmpdir1, "db1.db"))
-            db2 = RalphDB(os.path.join(tmpdir2, "db2.db"))
+            db1 = Ralph2DB(os.path.join(tmpdir1, "db1.db"))
+            db2 = Ralph2DB(os.path.join(tmpdir2, "db2.db"))
 
             run1 = Run(
                 id="run-1",
@@ -692,7 +740,7 @@ class TestDatabaseIsolation:
         """Test that temporary database files can be cleaned up."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            db = RalphDB(db_path)
+            db = Ralph2DB(db_path)
 
             run = Run(
                 id="test-run",
@@ -812,3 +860,429 @@ class TestModelToDict:
         assert input_dict["content"] == "Please add tests"
         assert input_dict["created_at"] == "2024-01-15T11:00:00"
         assert input_dict["consumed_at"] == "2024-01-15T11:10:00"
+
+
+class TestAgentOutputQuerying:
+    """Test querying agent outputs by iteration, type, and content."""
+
+    def test_query_outputs_by_agent_type(self, temp_db, sample_run):
+        """Test querying agent outputs by agent type."""
+        temp_db.create_run(sample_run)
+
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=1,
+            intent="First iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        ))
+
+        iter2 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=2,
+            intent="Second iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 45, 0)
+        ))
+
+        # Create outputs for different agents across iterations
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="planner",
+            raw_output_path=".ralph/outputs/planner_1.jsonl",
+            summary="Planned 3 tasks"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="executor",
+            raw_output_path=".ralph/outputs/executor_1.jsonl",
+            summary="Implemented feature X"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter2.id,
+            agent_type="planner",
+            raw_output_path=".ralph/outputs/planner_2.jsonl",
+            summary="Planned 2 more tasks"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter2.id,
+            agent_type="verifier",
+            raw_output_path=".ralph/outputs/verifier_2.jsonl",
+            summary="Spec not met - 3 gaps remaining"
+        ))
+
+        # Query for planner outputs
+        planner_outputs = temp_db.query_agent_outputs(agent_type="planner")
+        assert len(planner_outputs) == 2
+        assert all(o.agent_type == "planner" for o in planner_outputs)
+
+        # Query for executor outputs
+        executor_outputs = temp_db.query_agent_outputs(agent_type="executor")
+        assert len(executor_outputs) == 1
+        assert executor_outputs[0].agent_type == "executor"
+
+    def test_query_outputs_by_run_id(self, temp_db):
+        """Test querying agent outputs by run_id."""
+        run1 = Run(
+            id="run-1",
+            spec_path="Ralphfile",
+            spec_content="Spec 1",
+            status="running",
+            config={},
+            started_at=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        run2 = Run(
+            id="run-2",
+            spec_path="Ralphfile",
+            spec_content="Spec 2",
+            status="running",
+            config={},
+            started_at=datetime(2024, 1, 15, 11, 0, 0)
+        )
+
+        temp_db.create_run(run1)
+        temp_db.create_run(run2)
+
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run1.id,
+            number=1,
+            intent="Run 1 iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        ))
+
+        iter2 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run2.id,
+            number=1,
+            intent="Run 2 iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 11, 30, 0)
+        ))
+
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="planner",
+            raw_output_path=".ralph/outputs/planner_r1_1.jsonl",
+            summary="Run 1 planning"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter2.id,
+            agent_type="planner",
+            raw_output_path=".ralph/outputs/planner_r2_1.jsonl",
+            summary="Run 2 planning"
+        ))
+
+        # Query for run 1 outputs
+        run1_outputs = temp_db.query_agent_outputs(run_id="run-1")
+        assert len(run1_outputs) == 1
+        assert "Run 1" in run1_outputs[0].summary
+
+        # Query for run 2 outputs
+        run2_outputs = temp_db.query_agent_outputs(run_id="run-2")
+        assert len(run2_outputs) == 1
+        assert "Run 2" in run2_outputs[0].summary
+
+    def test_query_outputs_by_content(self, temp_db, sample_run):
+        """Test querying agent outputs by content search."""
+        temp_db.create_run(sample_run)
+
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=1,
+            intent="First iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        ))
+
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="executor",
+            raw_output_path=".ralph/outputs/executor_1.jsonl",
+            summary="Completed authentication module with JWT tokens"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="executor",
+            raw_output_path=".ralph/outputs/executor_2.jsonl",
+            summary="Implemented database migrations for user table"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="verifier",
+            raw_output_path=".ralph/outputs/verifier_1.jsonl",
+            summary="Spec not met - authentication tests missing"
+        ))
+
+        # Query for outputs containing "authentication"
+        auth_outputs = temp_db.query_agent_outputs(content_search="authentication")
+        assert len(auth_outputs) == 2
+        assert all("authentication" in o.summary.lower() for o in auth_outputs)
+
+        # Query for outputs containing "database"
+        db_outputs = temp_db.query_agent_outputs(content_search="database")
+        assert len(db_outputs) == 1
+        assert "database" in db_outputs[0].summary.lower()
+
+    def test_query_outputs_with_multiple_filters(self, temp_db, sample_run):
+        """Test querying agent outputs with multiple filters combined."""
+        temp_db.create_run(sample_run)
+
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=1,
+            intent="First iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        ))
+
+        iter2 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=2,
+            intent="Second iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 45, 0)
+        ))
+
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="executor",
+            raw_output_path=".ralph/outputs/executor_1.jsonl",
+            summary="Completed task with authentication"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="verifier",
+            raw_output_path=".ralph/outputs/verifier_1.jsonl",
+            summary="Verified authentication works"
+        ))
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter2.id,
+            agent_type="executor",
+            raw_output_path=".ralph/outputs/executor_2.jsonl",
+            summary="Completed task with database"
+        ))
+
+        # Query for executor outputs containing "authentication"
+        results = temp_db.query_agent_outputs(
+            agent_type="executor",
+            content_search="authentication"
+        )
+        assert len(results) == 1
+        assert results[0].agent_type == "executor"
+        assert "authentication" in results[0].summary.lower()
+
+    def test_query_outputs_returns_empty_when_no_match(self, temp_db, sample_run):
+        """Test that querying returns empty list when no outputs match."""
+        temp_db.create_run(sample_run)
+
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=sample_run.id,
+            number=1,
+            intent="First iteration",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0)
+        ))
+
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="planner",
+            raw_output_path=".ralph/outputs/planner_1.jsonl",
+            summary="Planned some tasks"
+        ))
+
+        # Query for non-existent agent type
+        results = temp_db.query_agent_outputs(agent_type="nonexistent")
+        assert len(results) == 0
+
+        # Query for non-existent content
+        results = temp_db.query_agent_outputs(content_search="xyz123notfound")
+        assert len(results) == 0
+
+
+class TestResumability:
+    """Test that the state persistence supports resumability."""
+
+    def test_resume_from_interrupted_run(self, temp_db):
+        """Test that we can resume a run from where it left off."""
+        # Create a run
+        run = Run(
+            id="resumable-run",
+            spec_path="Ralphfile",
+            spec_content="# Test Spec\nImplement feature X",
+            status="running",
+            config={"max_iterations": 10},
+            started_at=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        temp_db.create_run(run)
+
+        # Create some completed iterations
+        iter1 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run.id,
+            number=1,
+            intent="First task",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0),
+            ended_at=datetime(2024, 1, 15, 10, 45, 0)
+        ))
+
+        iter2 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run.id,
+            number=2,
+            intent="Second task",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 45, 0),
+            ended_at=datetime(2024, 1, 15, 11, 0, 0)
+        ))
+
+        # Add some agent outputs
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter1.id,
+            agent_type="executor",
+            raw_output_path=".ralph2/outputs/executor_1.jsonl",
+            summary="Completed task 1"
+        ))
+
+        temp_db.create_agent_output(AgentOutput(
+            id=None,
+            iteration_id=iter2.id,
+            agent_type="executor",
+            raw_output_path=".ralph2/outputs/executor_2.jsonl",
+            summary="Completed task 2"
+        ))
+
+        # Now simulate resuming: we should be able to:
+        # 1. Get the latest run
+        latest_run = temp_db.get_latest_run()
+        assert latest_run is not None
+        assert latest_run.id == run.id
+        assert latest_run.status == "running"
+
+        # 2. Get the latest iteration to know where to continue from
+        latest_iteration = temp_db.get_latest_iteration(run.id)
+        assert latest_iteration is not None
+        assert latest_iteration.number == 2
+        assert latest_iteration.outcome == "continue"
+
+        # 3. Get all iterations to see history
+        all_iterations = temp_db.list_iterations(run.id)
+        assert len(all_iterations) == 2
+
+        # 4. Query agent outputs to see what was done
+        all_outputs = temp_db.query_agent_outputs(run_id=run.id)
+        assert len(all_outputs) == 2
+
+        # 5. Continue with iteration 3
+        iter3 = temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run.id,
+            number=3,
+            intent="Third task (resumed)",
+            outcome="done",
+            started_at=datetime(2024, 1, 15, 12, 0, 0),
+            ended_at=datetime(2024, 1, 15, 12, 15, 0)
+        ))
+
+        # 6. Update run status to completed
+        temp_db.update_run_status(run.id, "completed", datetime(2024, 1, 15, 12, 15, 0))
+
+        # Verify the run is now complete
+        completed_run = temp_db.get_run(run.id)
+        assert completed_run.status == "completed"
+        assert completed_run.ended_at is not None
+
+        # Verify we have 3 iterations total
+        final_iterations = temp_db.list_iterations(run.id)
+        assert len(final_iterations) == 3
+        assert final_iterations[2].intent == "Third task (resumed)"
+
+    def test_paused_run_can_be_resumed(self, temp_db):
+        """Test that a paused run can be identified and resumed."""
+        run = Run(
+            id="paused-run",
+            spec_path="Ralphfile",
+            spec_content="# Test Spec",
+            status="paused",
+            config={},
+            started_at=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        temp_db.create_run(run)
+
+        # Create an iteration before pausing
+        temp_db.create_iteration(Iteration(
+            id=None,
+            run_id=run.id,
+            number=1,
+            intent="Work before pause",
+            outcome="continue",
+            started_at=datetime(2024, 1, 15, 10, 30, 0),
+            ended_at=datetime(2024, 1, 15, 10, 45, 0)
+        ))
+
+        # Get the latest run and check it's paused
+        latest_run = temp_db.get_latest_run()
+        assert latest_run.status == "paused"
+
+        # Resume by updating status
+        temp_db.update_run_status(run.id, "running")
+
+        # Verify status changed
+        resumed_run = temp_db.get_run(run.id)
+        assert resumed_run.status == "running"
+
+    def test_human_input_persists_for_next_iteration(self, temp_db):
+        """Test that human input is stored and available for the next iteration."""
+        run = Run(
+            id="input-run",
+            spec_path="Ralphfile",
+            spec_content="# Test Spec",
+            status="running",
+            config={},
+            started_at=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        temp_db.create_run(run)
+
+        # User provides input
+        human_input = HumanInput(
+            id=None,
+            run_id=run.id,
+            input_type="comment",
+            content="Please focus on authentication first",
+            created_at=datetime(2024, 1, 15, 11, 0, 0)
+        )
+        temp_db.create_human_input(human_input)
+
+        # Get unconsumed inputs (would be read by Planner in next iteration)
+        unconsumed = temp_db.get_unconsumed_inputs(run.id)
+        assert len(unconsumed) == 1
+        assert unconsumed[0].content == "Please focus on authentication first"
+
+        # After Planner reads it, mark as consumed
+        temp_db.mark_input_consumed(unconsumed[0].id, datetime(2024, 1, 15, 11, 5, 0))
+
+        # Verify it's no longer unconsumed
+        still_unconsumed = temp_db.get_unconsumed_inputs(run.id)
+        assert len(still_unconsumed) == 0
