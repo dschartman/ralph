@@ -342,6 +342,25 @@ class TestIterationOperations:
         assert updated_iteration.outcome == "done"
         assert updated_iteration.ended_at == ended_at
 
+    def test_update_iteration_intent(self, temp_db, sample_run, sample_iteration):
+        """Test updating an iteration's intent field."""
+        temp_db.create_run(sample_run)
+        created = temp_db.create_iteration(sample_iteration)
+
+        # Original intent
+        assert created.intent == "Work on task A"
+
+        # Update intent
+        new_intent = "Work on task B - updated after planner decision"
+        temp_db.update_iteration_intent(created.id, new_intent)
+
+        # Verify intent was updated
+        updated_iteration = temp_db.get_iteration(created.id)
+        assert updated_iteration.intent == new_intent
+        # Other fields should remain unchanged
+        assert updated_iteration.outcome == sample_iteration.outcome
+        assert updated_iteration.number == sample_iteration.number
+
     def test_list_iterations_for_run(self, temp_db, sample_run):
         """Test listing all iterations for a specific run."""
         temp_db.create_run(sample_run)

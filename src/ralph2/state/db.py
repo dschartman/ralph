@@ -319,6 +319,25 @@ class Ralph2DB:
         if self._should_auto_commit():
             self.conn.commit()
 
+    def update_iteration_intent(self, iteration_id: int, intent: str):
+        """Update iteration intent.
+
+        This is typically called after the planner determines the intent
+        for the current iteration.
+
+        Args:
+            iteration_id: The iteration ID to update
+            intent: The new intent value
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE iterations
+            SET intent = ?
+            WHERE id = ?
+        """, (intent, iteration_id))
+        if self._should_auto_commit():
+            self.conn.commit()
+
     def list_iterations(self, run_id: str) -> List[Iteration]:
         """List all iterations for a run."""
         cursor = self.conn.cursor()

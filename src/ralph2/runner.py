@@ -19,6 +19,7 @@ from .agents.specialist import CodeReviewerSpecialist, run_specialist
 from .project import ProjectContext, read_memory
 from .feedback import create_work_items_from_feedback
 from .milestone import complete_milestone
+from .git import create_worktree, merge_branch_to_main, remove_worktree, abort_merge
 
 
 @dataclass
@@ -275,6 +276,106 @@ class Ralph2Runner:
                     capture_output=True, check=False, cwd=cwd
                 )
 
+    # =========================================================================
+    # Orchestrator-managed worktree lifecycle
+    # =========================================================================
+    #
+    # These methods implement the orchestrator-managed worktree pattern:
+    # - Create all worktrees BEFORE launching parallel executors
+    # - Merge completed worktrees SERIALLY after all executors finish
+    # - Cleanup ALL worktrees (guaranteed, even on failure)
+    #
+    # This eliminates:
+    # - Race conditions from parallel merges
+    # - "git checkout main" failures when other worktrees have main checked out
+    # - Stale worktrees from cleanup failures
+    # =========================================================================
+
+    def _create_worktrees(
+        self, work_items: List[dict], run_id: str
+    ) -> List[Tuple[dict, str, str]]:
+        """Create worktrees for each work item BEFORE launching executors.
+
+        This ensures all worktrees exist before any parallel execution begins,
+        preventing race conditions in branch/worktree creation.
+
+        Args:
+            work_items: List of work item dicts with 'work_item_id' key
+            run_id: Current run ID (for worktree path uniqueness)
+
+        Returns:
+            List of (work_item, worktree_path, branch_name) tuples for successful creations.
+            Failed creations are logged but not included in the result.
+        """
+        cwd = str(self.project_context.project_root)
+        worktree_info = []
+
+        for wi in work_items:
+            work_item_id = wi["work_item_id"]
+            try:
+                worktree_path, branch_name = create_worktree(work_item_id, run_id, cwd)
+                worktree_info.append((wi, worktree_path, branch_name))
+                print(f"   📂 Created worktree for {work_item_id}: {worktree_path}")
+            except RuntimeError as e:
+                print(f"   ❌ Failed to create worktree for {work_item_id}: {e}")
+                # Continue with other work items - don't let one failure stop all
+
+        return worktree_info
+
+    async def _merge_worktrees_serial(
+        self, completed: List[Tuple[dict, str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Merge completed worktrees to main ONE AT A TIME.
+
+        This serialized approach eliminates:
+        - Race conditions from parallel merges
+        - "git checkout main" failures
+
+        Args:
+            completed: List of (work_item, worktree_path, branch_name) for successful executors
+
+        Returns:
+            List of (work_item_id, error_message) for failed merges
+        """
+        cwd = str(self.project_context.project_root)
+        failed_merges = []
+
+        for wi, worktree_path, branch_name in completed:
+            work_item_id = wi["work_item_id"]
+            print(f"   🔀 Merging {branch_name} to main...")
+
+            success, error_msg = merge_branch_to_main(branch_name, cwd)
+
+            if success:
+                print(f"   ✅ Merged {work_item_id} successfully")
+            else:
+                print(f"   ❌ Merge failed for {work_item_id}: {error_msg}")
+                failed_merges.append((work_item_id, error_msg))
+                # Abort the failed merge to leave main in a clean state
+                abort_merge(cwd)
+
+        return failed_merges
+
+    def _cleanup_all_worktrees(self, worktree_info: List[Tuple[dict, str, str]]) -> None:
+        """Cleanup ALL worktrees, guaranteed to attempt all regardless of failures.
+
+        This method:
+        - Attempts cleanup for every worktree
+        - Logs failures but doesn't raise
+        - Is safe to call even if some executors failed
+
+        Args:
+            worktree_info: List of (work_item, worktree_path, branch_name) tuples
+        """
+        cwd = str(self.project_context.project_root)
+
+        for wi, worktree_path, branch_name in worktree_info:
+            work_item_id = wi["work_item_id"]
+            success = remove_worktree(worktree_path, branch_name, cwd)
+            if success:
+                print(f"   🧹 Cleaned up worktree for {work_item_id}")
+            # Failures are already logged by remove_worktree
+
     def _handle_human_inputs(self, run_id: str) -> Tuple[Optional[str], List[str]]:
         """Process human inputs and return early exit status if needed.
 
@@ -299,26 +400,134 @@ class Ralph2Runner:
 
         return None, human_input_messages
 
+    def _is_recoverable_error(self, error: Exception) -> bool:
+        """Determine if an error is recoverable (can be retried) or fatal.
+
+        Recoverable errors:
+        - Rate limits (429, overloaded)
+        - Network timeouts
+        - Connection errors
+        - Temporary service unavailability
+
+        Fatal errors (require human intervention):
+        - Invalid API key / authentication
+        - Invalid configuration
+        - Missing required files
+        - Permission errors
+
+        Args:
+            error: The exception to classify
+
+        Returns:
+            True if the error is recoverable and can be retried
+        """
+        error_str = str(error).lower()
+
+        # Recoverable patterns
+        recoverable_patterns = [
+            "rate limit",
+            "429",
+            "overloaded",
+            "timeout",
+            "connection",
+            "network",
+            "temporary",
+            "unavailable",
+            "retry",
+            "503",
+            "502",
+            "500",
+        ]
+
+        # Fatal patterns (non-recoverable)
+        fatal_patterns = [
+            "api key",
+            "authentication",
+            "unauthorized",
+            "401",
+            "403",
+            "permission denied",
+            "file not found",
+            "no such file",
+            "invalid config",
+        ]
+
+        # Check for fatal patterns first
+        for pattern in fatal_patterns:
+            if pattern in error_str:
+                return False
+
+        # Check for recoverable patterns
+        for pattern in recoverable_patterns:
+            if pattern in error_str:
+                return True
+
+        # Default: assume recoverable for unknown errors
+        # This is safer than defaulting to fatal, as retry is harmless
+        return True
+
+    async def _run_planner_with_retry(
+        self, ctx: IterationContext, human_messages: List[str], max_retries: int = 3
+    ) -> Tuple[Optional[dict], Optional[Exception]]:
+        """Run the planner with retry for transient errors.
+
+        Args:
+            ctx: Iteration context
+            human_messages: Human input messages
+            max_retries: Maximum retry attempts for recoverable errors
+
+        Returns:
+            (planner_result, error) - result is None if failed, error is None if succeeded
+        """
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                result = await run_planner(
+                    spec_content=self.spec_content,
+                    last_executor_summary=ctx.last_executor_summary,
+                    last_verifier_assessment=ctx.last_verifier_assessment,
+                    last_specialist_feedback=ctx.last_specialist_feedback,
+                    human_inputs=human_messages if human_messages else None,
+                    memory=ctx.memory,
+                    project_id=self.project_context.project_id,
+                    root_work_item_id=self.root_work_item_id
+                )
+                return result, None
+            except Exception as e:
+                last_error = e
+
+                # Check if error is recoverable
+                if not self._is_recoverable_error(e):
+                    print(f"   ❌ Fatal planner error (non-recoverable): {e}")
+                    return None, e
+
+                # Recoverable error - retry with backoff
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                    print(f"   ⚠️  Planner attempt {attempt + 1} failed: {e}")
+                    print(f"   ⏳ Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+
+        print(f"   ❌ Planner failed after {max_retries} attempts")
+        return None, last_error
+
     async def _run_planner_phase(self, ctx: IterationContext, human_messages: List[str]) -> Tuple[bool, Optional[str]]:
         """Run the planner phase.
 
         Returns:
             (success, early_exit_status) - early_exit_status is the status if run should end
         """
+        # Pre-iteration health check: clean stale worktrees
+        self._cleanup_abandoned_branches()
+
         print("🧠 Running Planner...")
-        try:
-            planner_result = await run_planner(
-                spec_content=self.spec_content,
-                last_executor_summary=ctx.last_executor_summary,
-                last_verifier_assessment=ctx.last_verifier_assessment,
-                last_specialist_feedback=ctx.last_specialist_feedback,
-                human_inputs=human_messages if human_messages else None,
-                memory=ctx.memory,
-                project_id=self.project_context.project_id,
-                root_work_item_id=self.root_work_item_id
-            )
-        except Exception as e:
-            print(f"   ❌ Planner error: {e}")
+
+        # Run planner with retry for transient errors
+        planner_result, error = await self._run_planner_with_retry(ctx, human_messages)
+
+        if error is not None:
+            print(f"   ❌ Planner error: {error}")
             self.db.update_iteration(ctx.iteration_id, "STUCK", datetime.now())
             self.db.update_run_status(ctx.run_id, "stuck", datetime.now())
             self._write_summary(ctx.run_id)
@@ -331,8 +540,7 @@ class Ralph2Runner:
         print(f"   Intent: {ctx.intent}\n")
 
         # Update iteration with intent
-        self.db.conn.execute("UPDATE iterations SET intent = ? WHERE id = ?", (ctx.intent, ctx.iteration_id))
-        self.db.conn.commit()
+        self.db.update_iteration_intent(ctx.iteration_id, ctx.intent)
 
         # Save planner output
         planner_output_path = self._save_agent_messages(ctx.iteration_id, "planner", planner_result["messages"])
@@ -395,39 +603,90 @@ class Ralph2Runner:
             return await self._run_single_executor(ctx)
 
     async def _run_parallel_executors(self, ctx: IterationContext) -> str:
-        """Run multiple executors in parallel."""
+        """Run multiple executors in parallel with orchestrator-managed worktrees.
+
+        Lifecycle:
+        1. Create all worktrees BEFORE launching executors
+        2. Run executors in parallel (each in its own worktree)
+        3. Merge completed worktrees SERIALLY after all executors finish
+        4. Cleanup ALL worktrees (guaranteed, even on failure)
+
+        This eliminates race conditions from parallel merges and ensures
+        cleanup happens even if executors fail.
+        """
         work_items = ctx.iteration_plan["work_items"]
         print(f"⚙️  Running {len(work_items)} Executors in parallel...")
 
-        executor_tasks = [
-            run_executor(
-                iteration_intent=ctx.intent, spec_content=self.spec_content,
-                memory=ctx.memory, work_item_id=wi["work_item_id"],
-                run_id=ctx.run_id  # Pass run_id for worktree path isolation
-            )
-            for wi in work_items
-        ]
+        # Phase 1: Create all worktrees BEFORE launching executors
+        print("   📦 Creating worktrees...")
+        worktree_info = self._create_worktrees(work_items, ctx.run_id)
 
-        executor_results = await asyncio.gather(*executor_tasks, return_exceptions=True)
+        if not worktree_info:
+            print("   ❌ No worktrees created, skipping parallel execution")
+            return "No executors ran - all worktree creations failed"
+
         all_summaries = []
+        executor_results = []
 
-        for i, result in enumerate(executor_results):
-            work_item_id = work_items[i]["work_item_id"]
-            if isinstance(result, Exception):
-                print(f"   ❌ Executor {i+1} ({work_item_id}) error: {result}")
-                result = self._create_error_executor_result(result)
+        try:
+            # Phase 2: Run executors in parallel
+            print("   🚀 Launching executors...")
+            executor_tasks = [
+                run_executor(
+                    iteration_intent=ctx.intent,
+                    spec_content=self.spec_content,
+                    memory=ctx.memory,
+                    work_item_id=wi["work_item_id"],
+                    run_id=ctx.run_id,
+                    worktree_path=wt_path,  # Orchestrator-managed worktree
+                )
+                for wi, wt_path, branch_name in worktree_info
+            ]
 
-            status, summary = result["status"], result["summary"]
-            print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
+            executor_results = await asyncio.gather(*executor_tasks, return_exceptions=True)
 
-            executor_output_path = self._save_agent_messages(
-                ctx.iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
-            )
-            self.db.create_agent_output(AgentOutput(
-                id=None, iteration_id=ctx.iteration_id, agent_type=f"executor_{i+1}",
-                raw_output_path=executor_output_path, summary=summary
-            ))
-            all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
+            # Process results
+            for i, result in enumerate(executor_results):
+                wi, wt_path, branch_name = worktree_info[i]
+                work_item_id = wi["work_item_id"]
+
+                if isinstance(result, Exception):
+                    print(f"   ❌ Executor {i+1} ({work_item_id}) error: {result}")
+                    result = self._create_error_executor_result(result)
+
+                status, summary = result["status"], result["summary"]
+                print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
+
+                executor_output_path = self._save_agent_messages(
+                    ctx.iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
+                )
+                self.db.create_agent_output(AgentOutput(
+                    id=None, iteration_id=ctx.iteration_id, agent_type=f"executor_{i+1}",
+                    raw_output_path=executor_output_path, summary=summary
+                ))
+                all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
+
+            # Phase 3: Merge completed worktrees SERIALLY
+            # Only merge worktrees where executor completed successfully
+            completed = [
+                (wi, wt_path, branch)
+                for (wi, wt_path, branch), result in zip(worktree_info, executor_results)
+                if not isinstance(result, Exception) and result.get("status") == "Completed"
+            ]
+
+            if completed:
+                print(f"   🔀 Merging {len(completed)} completed worktrees...")
+                failed_merges = await self._merge_worktrees_serial(completed)
+                if failed_merges:
+                    for work_item_id, error_msg in failed_merges:
+                        all_summaries.append(f"Merge failed for {work_item_id}: {error_msg}")
+            else:
+                print("   ⚠️  No completed executors to merge")
+
+        finally:
+            # Phase 4: Cleanup ALL worktrees (guaranteed)
+            print("   🧹 Cleaning up worktrees...")
+            self._cleanup_all_worktrees(worktree_info)
 
         print()
         return "\n\n".join(all_summaries)
@@ -472,35 +731,75 @@ class Ralph2Runner:
         print("🔍 Running Feedback Generators (Verifier + Specialists)...")
 
         specialists = [CodeReviewerSpecialist()]
-        feedback_tasks = [
-            run_verifier(spec_content=self.spec_content, memory=ctx.memory, root_work_item_id=self.root_work_item_id)
-        ]
-        for specialist in specialists:
-            feedback_tasks.append(run_specialist(
+
+        # Run verifier with retry for transient errors
+        verifier_result = await self._run_verifier_with_retry(ctx)
+
+        # Run specialists in parallel (no retry - less critical)
+        specialist_tasks = [
+            run_specialist(
                 specialist=specialist,
                 spec_content=self.spec_content,
                 memory=ctx.memory,
                 root_work_item_id=self.root_work_item_id or ""
-            ))
-
-        feedback_results = await asyncio.gather(*feedback_tasks, return_exceptions=True)
+            )
+            for specialist in specialists
+        ]
+        specialist_results = await asyncio.gather(*specialist_tasks, return_exceptions=True)
 
         # Process verifier
-        verifier_assessment = self._process_verifier_result(ctx, feedback_results[0])
+        verifier_assessment = self._process_verifier_result(ctx, verifier_result)
 
         # Process specialists
-        specialist_feedback = self._process_specialist_results(ctx, feedback_results[1:], specialists)
+        specialist_feedback = self._process_specialist_results(ctx, specialist_results, specialists)
 
         print()
         return verifier_assessment, specialist_feedback
 
+    async def _run_verifier_with_retry(self, ctx: IterationContext, max_retries: int = 3) -> Any:
+        """Run verifier with retry for transient errors.
+
+        Args:
+            ctx: Iteration context
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Verifier result dict or Exception if all retries failed
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                result = await run_verifier(
+                    spec_content=self.spec_content,
+                    memory=ctx.memory,
+                    root_work_item_id=self.root_work_item_id
+                )
+                return result
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                    print(f"   ⚠️  Verifier attempt {attempt + 1} failed: {e}")
+                    print(f"   ⏳ Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+
+        # All retries failed - return the last error
+        print(f"   ❌ Verifier failed after {max_retries} attempts")
+        return last_error
+
     def _process_verifier_result(self, ctx: IterationContext, result) -> str:
-        """Process verifier result and save output."""
+        """Process verifier result and save output.
+
+        IMPORTANT: When the verifier crashes, we use UNCERTAIN outcome instead of CONTINUE.
+        This prevents a crashed verifier from silently passing an iteration that may have issues.
+        The UNCERTAIN outcome signals that human attention may be needed.
+        """
         if isinstance(result, Exception):
             print(f"   ❌ Verifier error: {result}")
+            print(f"   ⚠️  Using UNCERTAIN outcome - crashed verifier should not silently pass")
             result = {
-                "outcome": "CONTINUE",
-                "assessment": f"Outcome: CONTINUE\nReasoning: Verifier agent crashed with error: {result}\nGaps: Unable to verify - agent error",
+                "outcome": "UNCERTAIN",
+                "assessment": f"Outcome: UNCERTAIN\nReasoning: Verifier agent crashed with error: {result}\nGaps: Unable to verify - agent error. Manual verification may be needed.",
                 "full_output": str(result),
                 "messages": []
             }
