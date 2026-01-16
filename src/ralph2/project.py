@@ -4,6 +4,8 @@ Handles the .ralph2-id file in project roots and computes paths to
 ~/.ralph2/projects/<uuid>/ for state storage.
 """
 
+import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -75,7 +77,12 @@ def get_project_id(project_root: Path) -> str:
     Get or create the project ID from .ralph2-id file.
 
     If .ralph2-id exists, reads and returns its contents.
-    If not, generates a new UUID v4, writes it, and returns it.
+    If not, generates a new UUID v4, writes it atomically, and returns it.
+
+    Uses atomic file operations (write to temp, rename) to prevent file
+    corruption if concurrent processes try to create the ID simultaneously.
+    Also handles race conditions where multiple processes attempt creation
+    simultaneously by re-reading after write failure.
 
     Args:
         project_root: Path to the project root directory
@@ -83,6 +90,9 @@ def get_project_id(project_root: Path) -> str:
     Returns:
         The project's UUID string
     """
+    import os
+    import tempfile
+
     id_path = project_root / RALPH2_ID_FILENAME
 
     if id_path.exists():
@@ -92,9 +102,43 @@ def get_project_id(project_root: Path) -> str:
 
     # Generate new UUID
     project_id = str(uuid.uuid4())
-    id_path.write_text(project_id + "\n")
 
-    return project_id
+    # Write atomically: create temp file in same directory, then rename
+    # This ensures the file is either fully written or not at all
+    fd, temp_path = tempfile.mkstemp(dir=project_root, prefix='.ralph2-id-')
+    try:
+        os.write(fd, (project_id + "\n").encode())
+        os.close(fd)
+        fd = None  # Mark as closed
+        # Use link + unlink pattern for exclusive creation (atomic on POSIX)
+        # If another process created the file first, link will fail
+        try:
+            os.link(temp_path, id_path)
+            os.unlink(temp_path)
+            # We won the race - return our ID
+            return project_id
+        except FileExistsError:
+            # Another process won the race - read their ID
+            os.unlink(temp_path)
+            existing_id = id_path.read_text().strip()
+            if existing_id:
+                return existing_id
+            # Edge case: file exists but empty, use replace as fallback
+            os.replace(temp_path, id_path) if os.path.exists(temp_path) else None
+            return project_id
+        except OSError:
+            # link() not supported (e.g., some filesystems), fall back to replace
+            os.replace(temp_path, id_path)
+            # Check if we actually won or someone beat us
+            final_id = id_path.read_text().strip()
+            return final_id if final_id else project_id
+    except Exception:
+        # Clean up temp file on error
+        if fd is not None:
+            os.close(fd)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise
 
 
 def get_project_state_dir(project_id: str) -> Path:

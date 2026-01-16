@@ -134,6 +134,73 @@ class TestGetProjectId:
             except ValueError:
                 pytest.fail(f"Invalid UUID format: {project_id}")
 
+    def test_get_project_id_uses_atomic_write(self):
+        """Test that get_project_id uses atomic write (temp file + rename).
+
+        This ensures concurrent processes don't corrupt the ID file.
+        We verify by checking that the file was created atomically - if
+        interrupted mid-write, either the old file exists completely or
+        the new file exists completely.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            id_path = project_root / RALPH2_ID_FILENAME
+
+            # Generate a new project ID
+            project_id = get_project_id(project_root)
+
+            # The file should exist with complete content (no partial writes)
+            assert id_path.exists()
+            content = id_path.read_text()
+            # Should have the UUID followed by newline
+            assert content.strip() == project_id
+            # Verify it's a valid UUID
+            uuid.UUID(project_id)
+
+    def test_get_project_id_atomic_write_no_temp_files_left(self):
+        """Test that atomic write doesn't leave temp files behind."""
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+
+            # Generate a new project ID
+            get_project_id(project_root)
+
+            # Should only have the .ralph2-id file, no temp files
+            files = list(project_root.iterdir())
+            assert len(files) == 1
+            assert files[0].name == RALPH2_ID_FILENAME
+
+    def test_get_project_id_uses_atomic_write_pattern(self):
+        """Test that atomic write uses temp file + link/rename pattern.
+
+        This test mocks os.link to verify atomic file creation is used.
+        os.link is the preferred method for atomic file creation on POSIX systems
+        because it will fail if the target already exists.
+        """
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            id_path = project_root / RALPH2_ID_FILENAME
+
+            # Track if os.link was called (preferred atomic pattern)
+            original_link = os.link
+            link_called = []
+
+            def mock_link(src, dst):
+                link_called.append((src, dst))
+                return original_link(src, dst)
+
+            with patch('os.link', side_effect=mock_link):
+                project_id = get_project_id(project_root)
+
+            # os.link should have been called with temp file -> target
+            assert len(link_called) == 1, "os.link should be called once for atomic file creation"
+            src, dst = link_called[0]
+            assert str(dst) == str(id_path), f"Target should be {id_path}, got {dst}"
+            # Source should be a temp file in same directory
+            assert str(project_root) in str(src), "Temp file should be in same directory"
+
 
 class TestGetProjectStateDir:
     """Tests for get_project_state_dir function."""

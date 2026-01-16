@@ -590,29 +590,24 @@ async def _run_executor_with_git_isolation(
     return _build_executor_response(result, full_text, messages)
 
 
-async def _handle_completed_status(
-    result: ExecutorResult,
+async def _attempt_conflict_resolution(
+    original_result: ExecutorResult,
+    merge_error: str,
     options: ClaudeAgentOptions,
     git_manager: GitBranchManager
 ) -> ExecutorResult:
-    """Handle Completed status: attempt merge and conflict resolution.
+    """Attempt to resolve merge conflicts by invoking the executor agent.
 
     Args:
-        result: The executor result
+        original_result: The original executor result before merge attempt
+        merge_error: Error message from failed merge
         options: Agent options for conflict resolution
         git_manager: GitBranchManager instance
 
     Returns:
-        Updated ExecutorResult
+        ExecutorResult - either the original result if resolution succeeds,
+        or a Blocked result if resolution fails
     """
-    merge_success, merge_error = git_manager.merge_to_main()
-
-    if merge_success:
-        # Merge succeeded - cleanup handled by context manager
-        print(f"\033[32m✓ Merged successfully\033[0m")
-        return result
-
-    # Merge failed - attempt resolution
     print(f"\033[33m⚠ Merge conflict detected. Attempting resolution...\033[0m")
 
     conflict_prompt = f"""# Merge Conflict Resolution
@@ -636,6 +631,7 @@ You attempted to merge your work but encountered a merge conflict:
         resolution_result = None
 
     # Check if conflicts are actually resolved
+    merge_success = False
     if resolution_result and resolution_result.status == "Completed":
         has_conflicts, _ = git_manager.check_merge_conflicts()
         if not has_conflicts:
@@ -644,7 +640,7 @@ You attempted to merge your work but encountered a merge conflict:
 
     if merge_success:
         print(f"\033[32m✓ Merge conflicts resolved and merged successfully\033[0m")
-        return result
+        return original_result
     else:
         # Resolution failed
         return ExecutorResult(
@@ -652,10 +648,36 @@ You attempted to merge your work but encountered a merge conflict:
             what_was_done="Work completed but merge conflict resolution failed",
             blockers=merge_error,
             notes="Attempted automatic conflict resolution but failed. Worktree and branch abandoned.",
-            efficiency_notes=result.efficiency_notes,
-            work_committed=result.work_committed,
-            traces_updated=result.traces_updated
+            efficiency_notes=original_result.efficiency_notes,
+            work_committed=original_result.work_committed,
+            traces_updated=original_result.traces_updated
         )
+
+
+async def _handle_completed_status(
+    result: ExecutorResult,
+    options: ClaudeAgentOptions,
+    git_manager: GitBranchManager
+) -> ExecutorResult:
+    """Handle Completed status: attempt merge and conflict resolution.
+
+    Args:
+        result: The executor result
+        options: Agent options for conflict resolution
+        git_manager: GitBranchManager instance
+
+    Returns:
+        Updated ExecutorResult
+    """
+    merge_success, merge_error = git_manager.merge_to_main()
+
+    if merge_success:
+        # Merge succeeded - cleanup handled by context manager
+        print(f"\033[32m✓ Merged successfully\033[0m")
+        return result
+
+    # Merge failed - attempt resolution
+    return await _attempt_conflict_resolution(result, merge_error, options, git_manager)
 
 
 def _handle_non_completed_status(result: ExecutorResult) -> ExecutorResult:

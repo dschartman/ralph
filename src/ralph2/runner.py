@@ -968,9 +968,7 @@ class Ralph2Runner:
         iteration_number = last_iteration.number if last_iteration else 0
         print(f"   Resuming from iteration {iteration_number + 1}\n")
 
-        last_exec, last_verify, last_spec = None, None, None
-        if last_iteration:
-            last_exec, last_verify, last_spec = self._get_last_outputs(last_iteration.id)
+        last_exec, last_verify, last_spec = self._get_last_iteration_summaries(run.id, last_iteration)
 
         return run.id, iteration_number, last_exec, last_verify, last_spec
 
@@ -985,9 +983,23 @@ class Ralph2Runner:
         print(f"🚀 Starting Ralph2 run: {run_id}\n📋 Spec: {self.spec_path}\n")
         return run_id, 0, None, None, None
 
-    def _get_last_outputs(self, iteration_id: int) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Extract last outputs from an iteration."""
-        outputs = self.db.get_agent_outputs(iteration_id)
+    def _get_last_iteration_summaries(
+        self, run_id: str, last_iteration: Optional[Any]
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Extract summaries from the last iteration.
+
+        Args:
+            run_id: The run ID (for context, not currently used)
+            last_iteration: The last iteration object, or None if no previous iteration
+
+        Returns:
+            Tuple of (executor_summary, verifier_assessment, specialist_feedback)
+            All values are None if last_iteration is None.
+        """
+        if last_iteration is None:
+            return None, None, None
+
+        outputs = self.db.get_agent_outputs(last_iteration.id)
         last_exec, last_verify, last_spec = None, None, None
 
         for output in outputs:
