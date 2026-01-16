@@ -121,7 +121,7 @@ class TestDatabaseInitialization:
         cursor.execute("PRAGMA table_info(runs)")
         columns = {row[1] for row in cursor.fetchall()}
 
-        expected_columns = {'id', 'spec_path', 'spec_content', 'status', 'config', 'started_at', 'ended_at'}
+        expected_columns = {'id', 'spec_path', 'spec_content', 'status', 'config', 'started_at', 'ended_at', 'root_work_item_id'}
         assert columns == expected_columns
 
     def test_iterations_table_columns(self, temp_db):
