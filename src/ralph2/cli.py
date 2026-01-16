@@ -135,12 +135,17 @@ def _get_work_item_spec(work_item_id: str) -> Optional[str]:
 def run(
     spec_path: Optional[str] = typer.Argument(None, help="Path to the Ralph2file (spec)"),
     max_iterations: int = typer.Option(50, help="Maximum number of iterations to run"),
-    root_work_item: Optional[str] = typer.Option(None, "--root-work-item", help="Root work item ID (spec milestone in Trace)")
+    root_work_item: Optional[str] = typer.Option(None, "--root-work-item", help="Root work item ID (spec milestone in Trace)"),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Milestone branch name (auto-generated from spec title if not provided)")
 ):
     """
     Run Ralph2 with the given spec.
 
     Either provide a Ralph2file path or use --root-work-item to use a Trace work item as the spec.
+
+    The --branch option specifies the milestone branch for this run. All executor work
+    will be isolated to this branch. If not provided, a branch is auto-generated from
+    the spec title (e.g., feature/my-feature-title).
     """
     # Validate prerequisites
     if not _validate_prerequisites():
@@ -182,7 +187,8 @@ def run(
             spec_path=effective_spec_path if not spec_content else None,
             project_context=ctx,
             root_work_item_id=root_work_item,
-            spec_content=spec_content
+            spec_content=spec_content,
+            branch=branch
         )
         status = asyncio.run(runner.run(max_iterations))
 
@@ -240,6 +246,8 @@ def status():
         table.add_row("Run ID", run.id)
         table.add_row("Status", _format_status(run.status))
         table.add_row("Spec", run.spec_path)
+        if run.milestone_branch:
+            table.add_row("Branch", run.milestone_branch)
         table.add_row("Started", run.started_at.strftime("%Y-%m-%d %H:%M:%S"))
 
         if run.ended_at:

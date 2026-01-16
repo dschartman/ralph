@@ -19,7 +19,7 @@ from .agents.specialist import CodeReviewerSpecialist, run_specialist
 from .project import ProjectContext, read_memory
 from .feedback import create_work_items_from_feedback
 from .milestone import complete_milestone
-from .git import create_worktree, merge_branch_to_main, remove_worktree, abort_merge
+from .git import create_worktree, merge_branch_to_main, merge_branch, remove_worktree, abort_merge
 
 
 @dataclass
@@ -58,6 +58,216 @@ def _extract_spec_title(spec_content: str) -> str:
     return "Spec"
 
 
+def slugify_spec_title(title: str, max_length: int = 50) -> str:
+    """
+    Convert a spec title to a URL/branch-safe slug.
+
+    Converts to lowercase, removes special characters, replaces spaces
+    with hyphens, and truncates to max_length.
+
+    Args:
+        title: The title to slugify
+        max_length: Maximum length of the slug (default: 50)
+
+    Returns:
+        Slugified title, or "spec" if result would be empty
+    """
+    if not title:
+        return "spec"
+
+    # Convert to lowercase
+    slug = title.lower()
+
+    # Replace any non-alphanumeric character (except spaces) with nothing
+    slug = re.sub(r'[^a-z0-9\s]', '', slug)
+
+    # Replace multiple spaces with single space
+    slug = re.sub(r'\s+', ' ', slug)
+
+    # Replace spaces with hyphens
+    slug = slug.replace(' ', '-')
+
+    # Remove leading/trailing hyphens
+    slug = slug.strip('-')
+
+    # Truncate to max_length, ensuring we don't cut mid-word if possible
+    if len(slug) > max_length:
+        slug = slug[:max_length]
+        # Remove trailing hyphen if present
+        slug = slug.rstrip('-')
+
+    # If result is empty, return default
+    if not slug:
+        return "spec"
+
+    return slug
+
+
+def branch_exists(branch_name: str, cwd: str) -> bool:
+    """
+    Check if a git branch exists.
+
+    Args:
+        branch_name: The branch name to check
+        cwd: Working directory (git repository root)
+
+    Returns:
+        True if branch exists, False otherwise
+    """
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False
+    )
+    return result.returncode == 0
+
+
+def generate_unique_branch_name(
+    slug: str,
+    cwd: str,
+    explicit_branch: str | None = None
+) -> str:
+    """
+    Generate a unique branch name from a slug.
+
+    If explicit_branch is provided, returns it as-is (reuses existing branches).
+    Otherwise, generates feature/{slug} and appends -2, -3, etc. if it exists.
+
+    Args:
+        slug: The slugified spec title
+        cwd: Working directory (git repository root)
+        explicit_branch: Optional explicit branch name to use
+
+    Returns:
+        A unique branch name in format "feature/{slug}" or "feature/{slug}-N"
+    """
+    # If explicit branch provided, use it as-is (reuse existing)
+    if explicit_branch:
+        return explicit_branch
+
+    # Generate base branch name
+    base_name = f"feature/{slug}"
+
+    # Check if base name exists
+    if not branch_exists(base_name, cwd):
+        return base_name
+
+    # Try with suffixes -2, -3, etc.
+    suffix = 2
+    while True:
+        candidate = f"{base_name}-{suffix}"
+        if not branch_exists(candidate, cwd):
+            return candidate
+        suffix += 1
+        # Safety limit to prevent infinite loop
+        if suffix > 100:
+            raise RuntimeError(f"Could not find unique branch name for {base_name}")
+
+
+def slugify_to_branch_name(title: str, max_length: int = 50) -> str:
+    """
+    Convert a title to a full branch name with feature/ prefix.
+
+    This is a convenience wrapper around slugify_spec_title that adds
+    the feature/ prefix.
+
+    Args:
+        title: The title to slugify
+        max_length: Maximum length of the slug portion (default: 50)
+
+    Returns:
+        Branch name in format "feature/{slug}" or "feature/spec" if empty
+    """
+    slug = slugify_spec_title(title, max_length)
+    return f"feature/{slug}"
+
+
+def create_milestone_branch(
+    branch_name: str,
+    cwd: str,
+    allow_suffix: bool = True
+) -> str:
+    """
+    Create a milestone branch if it doesn't exist.
+
+    When allow_suffix is True and the branch exists, appends -2, -3, etc.
+    until a unique name is found (for auto-generated branch names).
+
+    When allow_suffix is False and the branch exists, reuses the existing
+    branch (for user-specified --branch flag).
+
+    Args:
+        branch_name: The desired branch name
+        cwd: Working directory (git repository root)
+        allow_suffix: If True, append suffix to find unique name; if False,
+                     reuse existing branch
+
+    Returns:
+        The actual branch name used (may have suffix if allow_suffix=True)
+
+    Raises:
+        RuntimeError: If branch creation fails
+    """
+    # Check if branch exists
+    if branch_exists(branch_name, cwd):
+        if not allow_suffix:
+            # User-specified branch: reuse existing
+            return branch_name
+        else:
+            # Auto-generated: find unique name with suffix
+            suffix = 2
+            while True:
+                candidate = f"{branch_name}-{suffix}"
+                if not branch_exists(candidate, cwd):
+                    branch_name = candidate
+                    break
+                suffix += 1
+                if suffix > 100:
+                    raise RuntimeError(f"Could not find unique branch name for {branch_name}")
+
+    # Create the branch from main (as per spec: "create branch from main")
+    result = subprocess.run(
+        ["git", "branch", branch_name, "main"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False
+    )
+    if result.returncode != 0 and not branch_exists(branch_name, cwd):
+        raise RuntimeError(f"Failed to create branch {branch_name}: {result.stderr}")
+
+    return branch_name
+
+
+def _create_milestone_branch(branch_name: str, cwd: str) -> bool:
+    """
+    Create the milestone branch if it doesn't exist.
+
+    The branch is created from main to ensure a clean starting point.
+
+    Args:
+        branch_name: The branch name to create
+        cwd: Working directory (git repository root)
+
+    Returns:
+        True if branch was created or already exists
+    """
+    if branch_exists(branch_name, cwd):
+        return True
+
+    # Create branch from main (as per spec: "create branch from main")
+    result = subprocess.run(
+        ["git", "branch", branch_name, "main"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False
+    )
+    return result.returncode == 0
+
+
 class Ralph2Runner:
     """Orchestrates the Ralph2 multi-agent iteration loop."""
 
@@ -94,7 +304,8 @@ class Ralph2Runner:
         spec_path: Optional[str],
         project_context: ProjectContext,
         root_work_item_id: Optional[str] = None,
-        spec_content: Optional[str] = None
+        spec_content: Optional[str] = None,
+        branch: Optional[str] = None
     ):
         """
         Initialize Ralph2 runner.
@@ -104,6 +315,8 @@ class Ralph2Runner:
             project_context: ProjectContext with paths for state storage
             root_work_item_id: Optional root work item ID (spec milestone in Trace)
             spec_content: Optional spec content (used when running from work item)
+            branch: Optional explicit milestone branch name. If not provided, a branch
+                   will be auto-generated from the spec title.
 
         Raises:
             ValueError: If root_work_item_id is provided but has invalid format
@@ -119,6 +332,10 @@ class Ralph2Runner:
         self.db = Ralph2DB(str(project_context.db_path))
         self.root_work_item_id = root_work_item_id
 
+        # Store explicit branch (will be resolved during run if not provided)
+        self._branch = branch
+        self._milestone_branch: Optional[str] = None  # Will be set during run setup
+
         # Load spec content from file or use provided content
         if spec_content:
             self.spec_content = spec_content
@@ -130,6 +347,45 @@ class Ralph2Runner:
 
         # Output directory is managed by ProjectContext
         self.output_dir = project_context.outputs_dir
+
+    @property
+    def branch_option(self) -> Optional[str]:
+        """Get the explicit branch option passed to the runner."""
+        return self._branch
+
+    @property
+    def milestone_branch(self) -> Optional[str]:
+        """Get the current milestone branch (may be None until run starts)."""
+        return self._milestone_branch
+
+    @milestone_branch.setter
+    def milestone_branch(self, value: Optional[str]):
+        """Set the milestone branch."""
+        self._milestone_branch = value
+
+    def _ensure_milestone_branch(self) -> str:
+        """
+        Ensure a milestone branch exists for this run.
+
+        If an explicit branch was provided via --branch, uses that.
+        Otherwise, auto-generates from the spec title with uniqueness handling.
+
+        Returns:
+            The milestone branch name
+        """
+        cwd = str(self.project_context.project_root)
+
+        if self._branch:
+            # User-specified branch: use as-is (reuse if exists)
+            branch_name = create_milestone_branch(self._branch, cwd, allow_suffix=False)
+        else:
+            # Auto-generate from spec title
+            spec_title = _extract_spec_title(self.spec_content)
+            base_branch_name = slugify_to_branch_name(spec_title)
+            branch_name = create_milestone_branch(base_branch_name, cwd, allow_suffix=True)
+
+        self._milestone_branch = branch_name
+        return branch_name
 
     def _ensure_root_work_item(self) -> str:
         """
@@ -312,6 +568,9 @@ class Ralph2Runner:
         This ensures all worktrees exist before any parallel execution begins,
         preventing race conditions in branch/worktree creation.
 
+        Worktrees are branched FROM the milestone branch (not main), implementing
+        milestone branch isolation.
+
         Args:
             work_items: List of work item dicts with 'work_item_id' key
             run_id: Current run ID (for worktree path uniqueness)
@@ -323,10 +582,15 @@ class Ralph2Runner:
         cwd = str(self.project_context.project_root)
         worktree_info = []
 
+        # Use milestone branch as base if available, otherwise branch from current HEAD
+        base_branch = getattr(self, '_milestone_branch', None)
+
         for wi in work_items:
             work_item_id = wi["work_item_id"]
             try:
-                worktree_path, branch_name = create_worktree(work_item_id, run_id, cwd)
+                worktree_path, branch_name = create_worktree(
+                    work_item_id, run_id, cwd, base_branch=base_branch
+                )
                 worktree_info.append((wi, worktree_path, branch_name))
                 print(f"   📂 Created worktree for {work_item_id}: {worktree_path}")
             except RuntimeError as e:
@@ -338,11 +602,14 @@ class Ralph2Runner:
     async def _merge_worktrees_serial(
         self, completed: List[Tuple[dict, str, str]]
     ) -> List[Tuple[str, str]]:
-        """Merge completed worktrees to main ONE AT A TIME.
+        """Merge completed worktrees to the milestone branch ONE AT A TIME.
 
         This serialized approach eliminates:
         - Race conditions from parallel merges
-        - "git checkout main" failures
+        - "git checkout" failures
+
+        Implements milestone branch isolation by merging TO the milestone branch
+        (not main). If no milestone branch is set, falls back to main.
 
         Args:
             completed: List of (work_item, worktree_path, branch_name) for successful executors
@@ -353,18 +620,21 @@ class Ralph2Runner:
         cwd = str(self.project_context.project_root)
         failed_merges = []
 
+        # Merge to milestone branch if available, otherwise main
+        target_branch = getattr(self, '_milestone_branch', None) or "main"
+
         for wi, worktree_path, branch_name in completed:
             work_item_id = wi["work_item_id"]
-            print(f"   🔀 Merging {branch_name} to main...")
+            print(f"   🔀 Merging {branch_name} to {target_branch}...")
 
-            success, error_msg = merge_branch_to_main(branch_name, cwd)
+            success, error_msg = merge_branch(branch_name, cwd, target_branch=target_branch)
 
             if success:
                 print(f"   ✅ Merged {work_item_id} successfully")
             else:
                 print(f"   ❌ Merge failed for {work_item_id}: {error_msg}")
                 failed_merges.append((work_item_id, error_msg))
-                # Abort the failed merge to leave main in a clean state
+                # Abort the failed merge to leave target branch in a clean state
                 abort_merge(cwd)
 
         return failed_merges
@@ -960,6 +1230,14 @@ class Ralph2Runner:
         """Resume an interrupted run."""
         run.config["max_iterations"] = max_iterations
         print(f"♻️  Resuming interrupted Ralph2 run: {run.id}\n📋 Spec: {self.spec_path}")
+
+        # Restore milestone branch from the run record
+        if run.milestone_branch:
+            self._milestone_branch = run.milestone_branch
+            print(f"🌿 Milestone branch: {run.milestone_branch}")
+        else:
+            self._milestone_branch = None
+
         print(f"🧹 Cleaning up abandoned work from interruption...")
         self._cleanup_abandoned_branches()
         print()
@@ -973,15 +1251,48 @@ class Ralph2Runner:
         return run.id, iteration_number, last_exec, last_verify, last_spec
 
     def _create_new_run(self, max_iterations: int) -> Tuple[str, int, Optional[str], Optional[str], Optional[str]]:
-        """Create a new run."""
+        """Create a new run with milestone branch."""
         run_id = f"ralph2-{uuid.uuid4().hex[:8]}"
+
+        # Generate or use explicit milestone branch
+        milestone_branch = self._setup_milestone_branch()
+
         run = Run(
             id=run_id, spec_path=self.spec_path, spec_content=self.spec_content,
-            status="running", config={"max_iterations": max_iterations}, started_at=datetime.now()
+            status="running", config={"max_iterations": max_iterations}, started_at=datetime.now(),
+            milestone_branch=milestone_branch
         )
         self.db.create_run(run)
-        print(f"🚀 Starting Ralph2 run: {run_id}\n📋 Spec: {self.spec_path}\n")
+        print(f"🚀 Starting Ralph2 run: {run_id}\n📋 Spec: {self.spec_path}")
+        if milestone_branch:
+            print(f"🌿 Milestone branch: {milestone_branch}")
+        print()
         return run_id, 0, None, None, None
+
+    def _setup_milestone_branch(self) -> Optional[str]:
+        """Setup and create the milestone branch.
+
+        Returns:
+            The milestone branch name, or None if creation failed
+        """
+        cwd = str(self.project_context.project_root)
+
+        # Generate branch name from spec title if not explicitly provided
+        if self._branch:
+            branch_name = self._branch
+        else:
+            spec_title = _extract_spec_title(self.spec_content)
+            slug = slugify_spec_title(spec_title)
+            branch_name = generate_unique_branch_name(slug, cwd)
+
+        # Create the branch if it doesn't exist
+        if _create_milestone_branch(branch_name, cwd):
+            self._milestone_branch = branch_name
+            return branch_name
+        else:
+            print(f"   ⚠️  Warning: Could not create milestone branch {branch_name}")
+            self._milestone_branch = None
+            return None
 
     def _get_last_iteration_summaries(
         self, run_id: str, last_iteration: Optional[Any]

@@ -379,7 +379,7 @@ class TestRunnerOrchestratorMethods:
 
         created_worktrees = []
 
-        def mock_create_worktree(work_item_id, run_id, cwd):
+        def mock_create_worktree(work_item_id, run_id, cwd, base_branch=None):
             path = f"/mock/worktree/{work_item_id}"
             branch = f"ralph2/{work_item_id}"
             created_worktrees.append((work_item_id, path, branch))
@@ -389,6 +389,7 @@ class TestRunnerOrchestratorMethods:
         runner = Ralph2Runner.__new__(Ralph2Runner)
         runner.project_context = MagicMock()
         runner.project_context.project_root = "/mock/repo"
+        runner._milestone_branch = None  # No milestone branch set
 
         with patch('ralph2.runner.create_worktree', side_effect=mock_create_worktree):
             result = runner._create_worktrees(work_items, "run-abc123")
@@ -414,7 +415,7 @@ class TestRunnerOrchestratorMethods:
 
         call_count = [0]
 
-        def mock_create_worktree(work_item_id, run_id, cwd):
+        def mock_create_worktree(work_item_id, run_id, cwd, base_branch=None):
             call_count[0] += 1
             if work_item_id == "ralph-task2":
                 raise RuntimeError("Failed to create worktree")
@@ -423,6 +424,7 @@ class TestRunnerOrchestratorMethods:
         runner = Ralph2Runner.__new__(Ralph2Runner)
         runner.project_context = MagicMock()
         runner.project_context.project_root = "/mock/repo"
+        runner._milestone_branch = None  # No milestone branch set
 
         with patch('ralph2.runner.create_worktree', side_effect=mock_create_worktree):
             result = runner._create_worktrees(work_items, "run-abc123")
@@ -449,15 +451,16 @@ class TestRunnerOrchestratorMethods:
 
         merge_order = []
 
-        def mock_merge(branch_name, cwd):
+        def mock_merge(branch_name, cwd, target_branch="main"):
             merge_order.append(branch_name)
             return True, ""
 
         runner = Ralph2Runner.__new__(Ralph2Runner)
         runner.project_context = MagicMock()
         runner.project_context.project_root = "/mock/repo"
+        runner._milestone_branch = None  # No milestone branch, will merge to main
 
-        with patch('ralph2.runner.merge_branch_to_main', side_effect=mock_merge):
+        with patch('ralph2.runner.merge_branch', side_effect=mock_merge):
             failed = await runner._merge_worktrees_serial(completed)
 
         assert len(failed) == 0
@@ -477,7 +480,7 @@ class TestRunnerOrchestratorMethods:
 
         abort_called = [False]
 
-        def mock_merge(branch_name, cwd):
+        def mock_merge(branch_name, cwd, target_branch="main"):
             return False, "Merge conflict"
 
         def mock_abort(cwd):
@@ -487,8 +490,9 @@ class TestRunnerOrchestratorMethods:
         runner = Ralph2Runner.__new__(Ralph2Runner)
         runner.project_context = MagicMock()
         runner.project_context.project_root = "/mock/repo"
+        runner._milestone_branch = None  # No milestone branch, will merge to main
 
-        with patch('ralph2.runner.merge_branch_to_main', side_effect=mock_merge):
+        with patch('ralph2.runner.merge_branch', side_effect=mock_merge):
             with patch('ralph2.runner.abort_merge', side_effect=mock_abort):
                 failed = await runner._merge_worktrees_serial(completed)
 
