@@ -43,7 +43,8 @@ class Ralph2DB:
                 config TEXT NOT NULL,
                 started_at TEXT NOT NULL,
                 ended_at TEXT,
-                root_work_item_id TEXT
+                root_work_item_id TEXT,
+                milestone_branch TEXT
             )
         """)
 
@@ -91,6 +92,12 @@ class Ralph2DB:
         columns = [row[1] for row in cursor.fetchall()]
         if "root_work_item_id" not in columns:
             cursor.execute("ALTER TABLE runs ADD COLUMN root_work_item_id TEXT")
+
+        # Migration: Add milestone_branch column to runs table if it doesn't exist
+        cursor.execute("PRAGMA table_info(runs)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "milestone_branch" not in columns:
+            cursor.execute("ALTER TABLE runs ADD COLUMN milestone_branch TEXT")
 
         self.conn.commit()
 
@@ -196,15 +203,16 @@ class Ralph2DB:
             config=json.loads(row["config"]),
             started_at=datetime.fromisoformat(row["started_at"]),
             ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
-            root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
+            root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None,
+            milestone_branch=row["milestone_branch"] if "milestone_branch" in row.keys() else None
         )
 
     def create_run(self, run: Run) -> Run:
         """Create a new run."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO runs (id, spec_path, spec_content, status, config, started_at, ended_at, root_work_item_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (id, spec_path, spec_content, status, config, started_at, ended_at, root_work_item_id, milestone_branch)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run.id,
             run.spec_path,
@@ -213,7 +221,8 @@ class Ralph2DB:
             json.dumps(run.config),
             run.started_at.isoformat(),
             run.ended_at.isoformat() if run.ended_at else None,
-            run.root_work_item_id
+            run.root_work_item_id,
+            run.milestone_branch
         ))
         if self._should_auto_commit():
             self.conn.commit()
@@ -247,6 +256,25 @@ class Ralph2DB:
             SET root_work_item_id = ?
             WHERE id = ?
         """, (root_work_item_id, run_id))
+        if self._should_auto_commit():
+            self.conn.commit()
+
+    def update_run_milestone_branch(self, run_id: str, milestone_branch: str):
+        """Update run's milestone branch.
+
+        This is typically called after the milestone branch is created
+        for the run.
+
+        Args:
+            run_id: The run ID to update
+            milestone_branch: The milestone branch name (e.g., "feature/my-feature")
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE runs
+            SET milestone_branch = ?
+            WHERE id = ?
+        """, (milestone_branch, run_id))
         if self._should_auto_commit():
             self.conn.commit()
 

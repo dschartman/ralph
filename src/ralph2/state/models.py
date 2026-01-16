@@ -17,6 +17,7 @@ class Run:
     started_at: datetime
     ended_at: Optional[datetime] = None
     root_work_item_id: Optional[str] = None
+    milestone_branch: Optional[str] = None  # Feature branch for milestone isolation
 
     def to_dict(self) -> dict:
         return {
@@ -28,6 +29,7 @@ class Run:
             "started_at": self.started_at.isoformat(),
             "ended_at": self.ended_at.isoformat() if self.ended_at else None,
             "root_work_item_id": self.root_work_item_id,
+            "milestone_branch": self.milestone_branch,
         }
 
 

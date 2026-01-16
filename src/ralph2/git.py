@@ -42,13 +42,21 @@ class GitBranchManager:
         worktree_path: Path to the worktree (set after __enter__)
     """
 
-    def __init__(self, work_item_id: str, run_id: str, cwd: Optional[str] = None):
+    def __init__(
+        self,
+        work_item_id: str,
+        run_id: str,
+        cwd: Optional[str] = None,
+        base_branch: Optional[str] = None
+    ):
         """Initialize the GitBranchManager.
 
         Args:
             work_item_id: Work item ID (e.g., "ralph-abc123")
             run_id: Run ID (e.g., "ralph2-abc12345")
             cwd: Optional working directory. If not provided, uses os.getcwd()
+            base_branch: Optional branch to create the new branch from.
+                        If not provided, branches from current HEAD.
         """
         self.work_item_id = work_item_id
         self.run_id = run_id
@@ -56,6 +64,7 @@ class GitBranchManager:
         self._worktree_created = False
         self._worktree_path: Optional[str] = None
         self._branch_name = f"ralph2/{work_item_id}"
+        self._base_branch = base_branch
 
     @property
     def worktree_path(self) -> Optional[str]:
@@ -99,8 +108,11 @@ class GitBranchManager:
         """
         self._worktree_path = self.get_worktree_path()
 
-        # Create the branch first (from current HEAD)
-        result = self._run_git(["git", "branch", self._branch_name])
+        # Create the branch first (from base_branch if specified, otherwise current HEAD)
+        if self._base_branch:
+            result = self._run_git(["git", "branch", self._branch_name, self._base_branch])
+        else:
+            result = self._run_git(["git", "branch", self._branch_name])
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create branch: {result.stderr}")
 
@@ -176,18 +188,21 @@ class GitBranchManager:
         self._worktree_created = False
         return worktree_removed and branch_deleted
 
-    def merge_to_main(self) -> Tuple[bool, str]:
-        """Merge the feature branch to main.
+    def merge_to_target(self, target_branch: str = "main") -> Tuple[bool, str]:
+        """Merge the feature branch to a target branch.
 
         This should be called from the main repository (not the worktree).
+
+        Args:
+            target_branch: The branch to merge into (default: "main")
 
         Returns:
             (success, error_message)
         """
-        # Ensure we're on main branch
-        result = self._run_git(["git", "checkout", "main"])
+        # Ensure we're on the target branch
+        result = self._run_git(["git", "checkout", target_branch])
         if result.returncode != 0:
-            return False, f"Failed to checkout main: {result.stderr}"
+            return False, f"Failed to checkout {target_branch}: {result.stderr}"
 
         # Merge feature branch
         result = self._run_git(["git", "merge", self._branch_name])
@@ -195,6 +210,17 @@ class GitBranchManager:
             return False, f"Merge conflict: {result.stderr}"
 
         return True, ""
+
+    def merge_to_main(self) -> Tuple[bool, str]:
+        """Merge the feature branch to main.
+
+        This should be called from the main repository (not the worktree).
+        This is a convenience method that calls merge_to_target(target_branch="main").
+
+        Returns:
+            (success, error_message)
+        """
+        return self.merge_to_target(target_branch="main")
 
     def check_merge_conflicts(self) -> Tuple[bool, str]:
         """Check if there are unresolved merge conflicts.
@@ -285,7 +311,12 @@ def _run_git_command(command: list[str], cwd: str) -> subprocess.CompletedProces
     return subprocess.run(command, capture_output=True, text=True, cwd=cwd)
 
 
-def create_worktree(work_item_id: str, run_id: str, cwd: str) -> Tuple[str, str]:
+def create_worktree(
+    work_item_id: str,
+    run_id: str,
+    cwd: str,
+    base_branch: Optional[str] = None
+) -> Tuple[str, str]:
     """Create a git worktree and branch for executor work.
 
     This function is used by the orchestrator to create worktrees BEFORE
@@ -295,6 +326,8 @@ def create_worktree(work_item_id: str, run_id: str, cwd: str) -> Tuple[str, str]
         work_item_id: Work item ID (e.g., "ralph-abc123")
         run_id: Run ID (e.g., "ralph2-abc12345")
         cwd: Working directory (project root)
+        base_branch: Optional branch to create the new branch from.
+                    If not provided, branches from current HEAD.
 
     Returns:
         (worktree_path, branch_name)
@@ -305,8 +338,11 @@ def create_worktree(work_item_id: str, run_id: str, cwd: str) -> Tuple[str, str]
     worktree_path = _get_worktree_path(work_item_id, run_id, cwd)
     branch_name = _get_branch_name(work_item_id)
 
-    # Create the branch first (from current HEAD)
-    result = _run_git_command(["git", "branch", branch_name], cwd)
+    # Create the branch first (from base_branch if specified, otherwise current HEAD)
+    if base_branch:
+        result = _run_git_command(["git", "branch", branch_name, base_branch], cwd)
+    else:
+        result = _run_git_command(["git", "branch", branch_name], cwd)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to create branch '{branch_name}': {result.stderr}")
 
@@ -329,26 +365,31 @@ def create_worktree(work_item_id: str, run_id: str, cwd: str) -> Tuple[str, str]
         raise
 
 
-def merge_branch_to_main(branch_name: str, cwd: str) -> Tuple[bool, str]:
-    """Merge a feature branch to main.
+def merge_branch(
+    branch_name: str,
+    cwd: str,
+    target_branch: str = "main"
+) -> Tuple[bool, str]:
+    """Merge a feature branch to a target branch.
 
     This function is used by the orchestrator to merge completed worktrees
     SERIALLY after all executors finish, preventing race conditions.
 
     IMPORTANT: This uses `git merge --no-ff` to ensure the merge happens
-    even when main has moved forward, creating a merge commit.
+    even when the target branch has moved forward, creating a merge commit.
 
     Args:
         branch_name: The branch to merge (e.g., "ralph2/work-item-123")
         cwd: Working directory (project root, NOT the worktree)
+        target_branch: The branch to merge into (default: "main")
 
     Returns:
         (success, error_message) - error_message is empty on success
     """
-    # Ensure we're on main branch
-    result = _run_git_command(["git", "checkout", "main"], cwd)
+    # Ensure we're on the target branch
+    result = _run_git_command(["git", "checkout", target_branch], cwd)
     if result.returncode != 0:
-        return False, f"Failed to checkout main: {result.stderr}"
+        return False, f"Failed to checkout {target_branch}: {result.stderr}"
 
     # Merge feature branch
     result = _run_git_command(["git", "merge", branch_name, "--no-ff", "-m", f"Merge {branch_name}"], cwd)
@@ -364,6 +405,28 @@ def merge_branch_to_main(branch_name: str, cwd: str) -> Tuple[bool, str]:
         return False, f"Merge failed: {result.stderr}"
 
     return True, ""
+
+
+def merge_branch_to_main(branch_name: str, cwd: str) -> Tuple[bool, str]:
+    """Merge a feature branch to main.
+
+    This is a convenience function that calls merge_branch(target_branch="main").
+    Kept for backward compatibility.
+
+    This function is used by the orchestrator to merge completed worktrees
+    SERIALLY after all executors finish, preventing race conditions.
+
+    IMPORTANT: This uses `git merge --no-ff` to ensure the merge happens
+    even when main has moved forward, creating a merge commit.
+
+    Args:
+        branch_name: The branch to merge (e.g., "ralph2/work-item-123")
+        cwd: Working directory (project root, NOT the worktree)
+
+    Returns:
+        (success, error_message) - error_message is empty on success
+    """
+    return merge_branch(branch_name, cwd, target_branch="main")
 
 
 def abort_merge(cwd: str) -> bool:
