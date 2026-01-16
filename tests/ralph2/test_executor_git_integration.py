@@ -55,13 +55,12 @@ class TestExecutorUsesGitBranchManager:
                 mock_agent.return_value = (mock_result, "output", [])
 
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    with patch('os.chdir'):
-                        result = await run_executor(
-                            iteration_intent="Test intent",
-                            spec_content="Test spec",
-                            work_item_id="ralph-test1",
-                            run_id="run-abc123"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test intent",
+                        spec_content="Test spec",
+                        work_item_id="ralph-test1",
+                        run_id="run-abc123"
+                    )
 
         # Verify GitBranchManager was instantiated with correct arguments
         mock_gbm_class.assert_called_once()
@@ -105,13 +104,12 @@ class TestExecutorUsesGitBranchManager:
                 mock_agent.return_value = (mock_result, "output", [])
 
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    with patch('os.chdir'):
-                        result = await run_executor(
-                            iteration_intent="Test intent",
-                            spec_content="Test spec",
-                            work_item_id="ralph-test1",
-                            run_id="ralph2-run-xyz789"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test intent",
+                        spec_content="Test spec",
+                        work_item_id="ralph-test1",
+                        run_id="ralph2-run-xyz789"
+                    )
 
         # Verify run_id was passed
         assert "run_id" in captured_args
@@ -150,14 +148,13 @@ class TestExecutorUsesGitBranchManager:
                 mock_agent.side_effect = Exception("Agent crashed")
 
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    with patch('os.chdir'):
-                        # Even though agent crashes, cleanup should be guaranteed
-                        result = await run_executor(
-                            iteration_intent="Test intent",
-                            spec_content="Test spec",
-                            work_item_id="ralph-test1",
-                            run_id="run-abc123"
-                        )
+                    # Even though agent crashes, cleanup should be guaranteed
+                    result = await run_executor(
+                        iteration_intent="Test intent",
+                        spec_content="Test spec",
+                        work_item_id="ralph-test1",
+                        run_id="run-abc123"
+                    )
 
         # Cleanup should have been called via context manager __exit__
         assert cleanup_called[0], "Cleanup should be called even when agent fails"
@@ -229,13 +226,12 @@ class TestExecutorGitIntegrationBranches:
                 mock_agent.return_value = (mock_result, "output", [])
 
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    with patch('os.chdir'):
-                        result = await run_executor(
-                            iteration_intent="Test intent",
-                            spec_content="Test spec",
-                            work_item_id="ralph-test1",
-                            run_id="run-abc123"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test intent",
+                        spec_content="Test spec",
+                        work_item_id="ralph-test1",
+                        run_id="run-abc123"
+                    )
 
         assert merge_called[0], "merge_to_main should be called on Completed status"
         # Context manager __exit__ handles cleanup automatically
@@ -279,13 +275,12 @@ class TestExecutorGitIntegrationBranches:
                 mock_agent.return_value = (mock_result, "output", [])
 
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    with patch('os.chdir'):
-                        result = await run_executor(
-                            iteration_intent="Test intent",
-                            spec_content="Test spec",
-                            work_item_id="ralph-test1",
-                            run_id="run-abc123"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test intent",
+                        spec_content="Test spec",
+                        work_item_id="ralph-test1",
+                        run_id="run-abc123"
+                    )
 
         # On Blocked status, should NOT merge but should cleanup via __exit__
         assert not merge_called[0], "Should NOT merge on Blocked status"

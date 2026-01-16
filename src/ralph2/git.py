@@ -7,9 +7,20 @@ worktree and branch operations with context manager support for guaranteed clean
 import logging
 import os
 import subprocess
+import sys
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _warn(message: str) -> None:
+    """Print warning to stderr AND log it.
+
+    Cleanup failures need to be highly visible to users, not silently discarded.
+    We use both print (always visible) and logging (for structured logging if configured).
+    """
+    print(f"\033[33m⚠️  {message}\033[0m", file=sys.stderr)
+    logger.warning(message)
 
 
 class GitBranchManager:
@@ -106,7 +117,7 @@ class GitBranchManager:
             if branch_created:
                 cleanup_result = self._run_git(["git", "branch", "-D", self._branch_name])
                 if cleanup_result.returncode != 0:
-                    logger.warning(
+                    _warn(
                         f"Failed to cleanup branch '{self._branch_name}' after worktree creation failure: "
                         f"{cleanup_result.stderr}"
                     )
@@ -145,22 +156,22 @@ class GitBranchManager:
             result = self._run_git(["git", "worktree", "remove", self._worktree_path, "--force"])
             worktree_removed = result.returncode == 0
             if not worktree_removed:
-                logger.warning(
+                _warn(
                     f"Failed to remove worktree '{self._worktree_path}': {result.stderr}"
                 )
         except Exception as e:
-            logger.warning(f"Exception removing worktree '{self._worktree_path}': {e}")
+            _warn(f"Exception removing worktree '{self._worktree_path}': {e}")
 
         # Delete the branch (always attempt, even if worktree removal failed)
         try:
             result = self._run_git(["git", "branch", "-D", self._branch_name])
             branch_deleted = result.returncode == 0
             if not branch_deleted:
-                logger.warning(
+                _warn(
                     f"Failed to delete branch '{self._branch_name}': {result.stderr}"
                 )
         except Exception as e:
-            logger.warning(f"Exception deleting branch '{self._branch_name}': {e}")
+            _warn(f"Exception deleting branch '{self._branch_name}': {e}")
 
         self._worktree_created = False
         return worktree_removed and branch_deleted
@@ -217,3 +228,192 @@ class GitBranchManager:
             True if cleanup was successful
         """
         return self._cleanup()
+
+
+# =============================================================================
+# Standalone functions for orchestrator-managed worktree lifecycle
+# =============================================================================
+#
+# These functions are used by the orchestrator (runner.py) to manage worktrees
+# externally to the executors. This allows:
+# - Creating all worktrees BEFORE launching parallel executors
+# - Merging completed worktrees SERIALLY after all executors finish
+# - Guaranteed cleanup even if executors fail
+#
+# The GitBranchManager class is kept for backward compatibility with
+# single-executor mode where the executor manages its own worktree.
+# =============================================================================
+
+
+def _get_worktree_path(work_item_id: str, run_id: str, cwd: str) -> str:
+    """Calculate the worktree directory path.
+
+    Args:
+        work_item_id: Work item ID (e.g., "ralph-abc123")
+        run_id: Run ID (e.g., "ralph2-abc12345")
+        cwd: Working directory (project root)
+
+    Returns:
+        Absolute path to the worktree directory
+    """
+    parent_dir = os.path.dirname(cwd)
+    return os.path.join(parent_dir, f"ralph2-executor-{run_id}-{work_item_id}")
+
+
+def _get_branch_name(work_item_id: str) -> str:
+    """Get the branch name for a work item.
+
+    Args:
+        work_item_id: Work item ID
+
+    Returns:
+        Branch name
+    """
+    return f"ralph2/{work_item_id}"
+
+
+def _run_git_command(command: list[str], cwd: str) -> subprocess.CompletedProcess:
+    """Run a git command in the specified directory.
+
+    Args:
+        command: Git command as list of strings
+        cwd: Working directory
+
+    Returns:
+        CompletedProcess result
+    """
+    return subprocess.run(command, capture_output=True, text=True, cwd=cwd)
+
+
+def create_worktree(work_item_id: str, run_id: str, cwd: str) -> Tuple[str, str]:
+    """Create a git worktree and branch for executor work.
+
+    This function is used by the orchestrator to create worktrees BEFORE
+    launching parallel executors, ensuring no race conditions.
+
+    Args:
+        work_item_id: Work item ID (e.g., "ralph-abc123")
+        run_id: Run ID (e.g., "ralph2-abc12345")
+        cwd: Working directory (project root)
+
+    Returns:
+        (worktree_path, branch_name)
+
+    Raises:
+        RuntimeError: If branch or worktree creation fails
+    """
+    worktree_path = _get_worktree_path(work_item_id, run_id, cwd)
+    branch_name = _get_branch_name(work_item_id)
+
+    # Create the branch first (from current HEAD)
+    result = _run_git_command(["git", "branch", branch_name], cwd)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to create branch '{branch_name}': {result.stderr}")
+
+    # Create worktree for the branch
+    try:
+        result = _run_git_command(
+            ["git", "worktree", "add", worktree_path, branch_name], cwd
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to create worktree: {result.stderr}")
+        return worktree_path, branch_name
+    except Exception as e:
+        # Cleanup: delete the branch if worktree creation failed
+        cleanup_result = _run_git_command(["git", "branch", "-D", branch_name], cwd)
+        if cleanup_result.returncode != 0:
+            _warn(
+                f"Failed to cleanup branch '{branch_name}' after worktree creation failure: "
+                f"{cleanup_result.stderr}"
+            )
+        raise
+
+
+def merge_branch_to_main(branch_name: str, cwd: str) -> Tuple[bool, str]:
+    """Merge a feature branch to main.
+
+    This function is used by the orchestrator to merge completed worktrees
+    SERIALLY after all executors finish, preventing race conditions.
+
+    IMPORTANT: This uses `git merge --no-ff` to ensure the merge happens
+    even when main has moved forward, creating a merge commit.
+
+    Args:
+        branch_name: The branch to merge (e.g., "ralph2/work-item-123")
+        cwd: Working directory (project root, NOT the worktree)
+
+    Returns:
+        (success, error_message) - error_message is empty on success
+    """
+    # Ensure we're on main branch
+    result = _run_git_command(["git", "checkout", "main"], cwd)
+    if result.returncode != 0:
+        return False, f"Failed to checkout main: {result.stderr}"
+
+    # Merge feature branch
+    result = _run_git_command(["git", "merge", branch_name, "--no-ff", "-m", f"Merge {branch_name}"], cwd)
+    if result.returncode != 0:
+        # Check for merge conflict
+        status_result = _run_git_command(["git", "status", "--porcelain"], cwd)
+        conflicts = [
+            line for line in (status_result.stdout.strip().split('\n') if status_result.stdout.strip() else [])
+            if line.startswith('UU ') or line.startswith('AA ') or line.startswith('DD ')
+        ]
+        if conflicts:
+            return False, f"Merge conflict in files: {', '.join(line[3:] for line in conflicts)}"
+        return False, f"Merge failed: {result.stderr}"
+
+    return True, ""
+
+
+def abort_merge(cwd: str) -> bool:
+    """Abort an in-progress merge.
+
+    Args:
+        cwd: Working directory
+
+    Returns:
+        True if abort succeeded
+    """
+    result = _run_git_command(["git", "merge", "--abort"], cwd)
+    return result.returncode == 0
+
+
+def remove_worktree(worktree_path: str, branch_name: str, cwd: str) -> bool:
+    """Remove a worktree and delete its branch.
+
+    This function is used by the orchestrator for guaranteed cleanup.
+    It attempts both operations and logs warnings on failure but does not raise.
+
+    Args:
+        worktree_path: Path to the worktree to remove
+        branch_name: Branch name to delete
+        cwd: Working directory (project root)
+
+    Returns:
+        True if all cleanup succeeded, False otherwise
+    """
+    worktree_removed = False
+    branch_deleted = False
+
+    # Remove the worktree
+    try:
+        result = _run_git_command(
+            ["git", "worktree", "remove", worktree_path, "--force"], cwd
+        )
+        worktree_removed = result.returncode == 0
+        if not worktree_removed:
+            _warn(f"Failed to remove worktree '{worktree_path}': {result.stderr}")
+    except Exception as e:
+        _warn(f"Exception removing worktree '{worktree_path}': {e}")
+
+    # Delete the branch (always attempt, even if worktree removal failed)
+    try:
+        result = _run_git_command(["git", "branch", "-D", branch_name], cwd)
+        branch_deleted = result.returncode == 0
+        if not branch_deleted:
+            _warn(f"Failed to delete branch '{branch_name}': {result.stderr}")
+    except Exception as e:
+        _warn(f"Exception deleting branch '{branch_name}': {e}")
+
+    return worktree_removed and branch_deleted

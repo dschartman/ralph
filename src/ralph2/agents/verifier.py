@@ -9,10 +9,7 @@ from claude_agent_sdk.types import ResultMessage
 
 from ralph2.agents.models import VerifierResult
 from ralph2.agents.streaming import stream_agent_output
-
-
-# Model to use for all agents
-AGENT_MODEL = "claude-opus-4-5"
+from ralph2.agents.constants import AGENT_MODEL
 
 
 VERIFIER_SYSTEM_PROMPT = """You are the Verifier. Your ONE job: determine if the spec is satisfied.

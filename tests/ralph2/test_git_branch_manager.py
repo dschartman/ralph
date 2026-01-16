@@ -415,7 +415,6 @@ class TestCleanupLoggingOnFailure:
     def test_cleanup_logs_error_when_worktree_removal_fails(self):
         """Test that errors are logged when worktree removal fails during cleanup."""
         from ralph2.git import GitBranchManager
-        import logging
 
         def mock_run(cmd, *args, **kwargs):
             result = MagicMock()
@@ -437,21 +436,20 @@ class TestCleanupLoggingOnFailure:
                 manager._worktree_path = "/mock/worktree"
 
                 # Should log error but not raise
-                with patch('ralph2.git.logger') as mock_logger:
+                with patch('ralph2.git._warn') as mock_warn:
                     result = manager._cleanup()
 
                     # Cleanup should return False on failure
                     assert result is False
 
                     # Error should be logged for worktree removal failure
-                    mock_logger.warning.assert_called()
-                    logged_message = mock_logger.warning.call_args[0][0]
+                    mock_warn.assert_called()
+                    logged_message = mock_warn.call_args[0][0]
                     assert "worktree" in logged_message.lower()
 
     def test_cleanup_logs_error_when_branch_deletion_fails(self):
         """Test that errors are logged when branch deletion fails during cleanup."""
         from ralph2.git import GitBranchManager
-        import logging
 
         def mock_run(cmd, *args, **kwargs):
             result = MagicMock()
@@ -475,15 +473,15 @@ class TestCleanupLoggingOnFailure:
                 manager._worktree_created = True
                 manager._worktree_path = "/mock/worktree"
 
-                with patch('ralph2.git.logger') as mock_logger:
+                with patch('ralph2.git._warn') as mock_warn:
                     result = manager._cleanup()
 
                     # Cleanup should return False on failure
                     assert result is False
 
                     # Error should be logged for branch deletion failure
-                    mock_logger.warning.assert_called()
-                    logged_message = mock_logger.warning.call_args[0][0]
+                    mock_warn.assert_called()
+                    logged_message = mock_warn.call_args[0][0]
                     assert "branch" in logged_message.lower()
 
     def test_enter_logs_error_when_branch_cleanup_fails_after_worktree_failure(self):
@@ -514,7 +512,7 @@ class TestCleanupLoggingOnFailure:
 
         with patch('subprocess.run', side_effect=mock_run):
             with patch('os.getcwd', return_value='/mock/repo'):
-                with patch('ralph2.git.logger') as mock_logger:
+                with patch('ralph2.git._warn') as mock_warn:
                     manager = GitBranchManager(work_item_id="ralph-test1", run_id="run-abc123")
 
                     # Enter should fail due to worktree creation failure
@@ -525,8 +523,8 @@ class TestCleanupLoggingOnFailure:
                     assert "Failed to create worktree" in str(exc_info.value)
 
                     # But cleanup failure should ALSO be logged
-                    mock_logger.warning.assert_called()
-                    logged_message = mock_logger.warning.call_args[0][0]
+                    mock_warn.assert_called()
+                    logged_message = mock_warn.call_args[0][0]
                     assert "cleanup" in logged_message.lower() or "branch" in logged_message.lower()
 
 
@@ -576,10 +574,11 @@ class TestCleanupMethod:
 
         with patch('subprocess.run', side_effect=mock_run):
             with patch('os.getcwd', return_value='/mock/repo'):
-                manager = GitBranchManager(work_item_id="ralph-test1", run_id="run-abc123")
-                manager._worktree_path = "/mock/worktree/path"
+                with patch('ralph2.git._warn'):  # Suppress warning output
+                    manager = GitBranchManager(work_item_id="ralph-test1", run_id="run-abc123")
+                    manager._worktree_path = "/mock/worktree/path"
 
-                result = manager.cleanup()
+                    result = manager.cleanup()
 
         assert result is False, "Cleanup should return False on failure"
 

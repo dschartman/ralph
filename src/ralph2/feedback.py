@@ -2,7 +2,7 @@
 
 import re
 import subprocess
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 from pathlib import Path
 
 
@@ -74,7 +74,7 @@ def _is_duplicate_feedback(title: str, existing_titles: Set[str]) -> bool:
     return False
 
 
-def parse_feedback_item(feedback: str) -> Dict[str, any]:
+def parse_feedback_item(feedback: str) -> Dict[str, Any]:
     """
     Parse a feedback item to extract priority and title.
 

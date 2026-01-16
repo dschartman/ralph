@@ -175,6 +175,30 @@ class Ralph2DB:
         """
         return self._transaction_depth == 0 and not self._in_transaction
 
+    def _row_to_run(self, row: sqlite3.Row) -> Run:
+        """
+        Convert a database row to a Run object.
+
+        This helper eliminates code duplication across get_run(), get_latest_run(),
+        and list_runs().
+
+        Args:
+            row: A sqlite3.Row from the runs table
+
+        Returns:
+            A Run object with all fields populated from the row
+        """
+        return Run(
+            id=row["id"],
+            spec_path=row["spec_path"],
+            spec_content=row["spec_content"],
+            status=row["status"],
+            config=json.loads(row["config"]),
+            started_at=datetime.fromisoformat(row["started_at"]),
+            ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+            root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
+        )
+
     def create_run(self, run: Run) -> Run:
         """Create a new run."""
         cursor = self.conn.cursor()
@@ -201,16 +225,7 @@ class Ralph2DB:
         cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
         row = cursor.fetchone()
         if row:
-            return Run(
-                id=row["id"],
-                spec_path=row["spec_path"],
-                spec_content=row["spec_content"],
-                status=row["status"],
-                config=json.loads(row["config"]),
-                started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
-                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
-            )
+            return self._row_to_run(row)
         return None
 
     def update_run_status(self, run_id: str, status: str, ended_at: Optional[datetime] = None):
@@ -241,16 +256,7 @@ class Ralph2DB:
         cursor.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1")
         row = cursor.fetchone()
         if row:
-            return Run(
-                id=row["id"],
-                spec_path=row["spec_path"],
-                spec_content=row["spec_content"],
-                status=row["status"],
-                config=json.loads(row["config"]),
-                started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
-                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
-            )
+            return self._row_to_run(row)
         return None
 
     def list_runs(self) -> List[Run]:
@@ -258,19 +264,7 @@ class Ralph2DB:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM runs ORDER BY started_at DESC")
         rows = cursor.fetchall()
-        return [
-            Run(
-                id=row["id"],
-                spec_path=row["spec_path"],
-                spec_content=row["spec_content"],
-                status=row["status"],
-                config=json.loads(row["config"]),
-                started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
-                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
-            )
-            for row in rows
-        ]
+        return [self._row_to_run(row) for row in rows]
 
     def create_iteration(self, iteration: Iteration) -> Iteration:
         """Create a new iteration."""

@@ -14,17 +14,43 @@ RALPH2_HOME = Path.home() / ".ralph2"
 RALPH2_PROJECTS_DIR = RALPH2_HOME / "projects"
 
 
-def find_project_root(start_path: Optional[Path] = None) -> Optional[Path]:
+def find_git_root(start_path: Optional[Path] = None) -> Optional[Path]:
     """
-    Find the project root by looking for a Ralph2file.
-
-    Walks up from start_path (or cwd) until it finds a Ralph2file.
+    Find the git repository root.
 
     Args:
         start_path: Starting directory (defaults to cwd)
 
     Returns:
-        Path to project root, or None if no Ralph2file found
+        Path to git root, or None if not in a git repo
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=start_path or Path.cwd()
+        )
+        return Path(result.stdout.strip())
+    except subprocess.CalledProcessError:
+        return None
+
+
+def find_project_root(start_path: Optional[Path] = None, require_spec: bool = True) -> Optional[Path]:
+    """
+    Find the project root by looking for a Ralph2file or git root.
+
+    Walks up from start_path (or cwd) until it finds a Ralph2file.
+    If require_spec is False, falls back to git root.
+
+    Args:
+        start_path: Starting directory (defaults to cwd)
+        require_spec: If True, requires Ralph2file; if False, can use git root
+
+    Returns:
+        Path to project root, or None if no Ralph2file found (and require_spec=True)
     """
     current = Path(start_path or Path.cwd()).resolve()
 
@@ -36,6 +62,10 @@ def find_project_root(start_path: Optional[Path] = None) -> Optional[Path]:
     # Check root directory too
     if (current / "Ralph2file").exists():
         return current
+
+    # Fall back to git root if spec not required
+    if not require_spec:
+        return find_git_root(start_path)
 
     return None
 
@@ -53,16 +83,16 @@ def get_project_id(project_root: Path) -> str:
     Returns:
         The project's UUID string
     """
-    temper_id_path = project_root / RALPH2_ID_FILENAME
+    id_path = project_root / RALPH2_ID_FILENAME
 
-    if temper_id_path.exists():
-        project_id = temper_id_path.read_text().strip()
+    if id_path.exists():
+        project_id = id_path.read_text().strip()
         if project_id:
             return project_id
 
     # Generate new UUID
     project_id = str(uuid.uuid4())
-    temper_id_path.write_text(project_id + "\n")
+    id_path.write_text(project_id + "\n")
 
     return project_id
 
@@ -189,7 +219,7 @@ def ensure_ralph2_id_in_gitignore(project_root: Path) -> bool:
         True if .ralph2-id was added, False if it was already present
     """
     gitignore_path = project_root / ".gitignore"
-    temper_id_entry = RALPH2_ID_FILENAME
+    id_entry = RALPH2_ID_FILENAME
 
     if gitignore_path.exists():
         content = gitignore_path.read_text()
@@ -198,13 +228,13 @@ def ensure_ralph2_id_in_gitignore(project_root: Path) -> bool:
         content = ""
         lines = []
 
-    if temper_id_entry in lines:
+    if id_entry in lines:
         return False
 
     # Add .ralph2-id to gitignore
     if content and not content.endswith('\n'):
         content += '\n'
-    content += temper_id_entry + '\n'
+    content += id_entry + '\n'
     gitignore_path.write_text(content)
 
     return True
@@ -217,21 +247,25 @@ class ProjectContext:
     Use this to get consistent paths throughout Ralph2.
     """
 
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(self, project_root: Optional[Path] = None, require_spec: bool = True):
         """
         Initialize project context.
 
         Args:
             project_root: Path to project root (will search for Ralph2file if None)
+            require_spec: If True, requires Ralph2file; if False, can use git root
 
         Raises:
-            ValueError: If no project root found (no Ralph2file)
+            ValueError: If no project root found
         """
         if project_root is None:
-            project_root = find_project_root()
+            project_root = find_project_root(require_spec=require_spec)
 
         if project_root is None:
-            raise ValueError("No Ralph2file found in current directory or parents")
+            if require_spec:
+                raise ValueError("No Ralph2file found in current directory or parents")
+            else:
+                raise ValueError("No git repository found in current directory or parents")
 
         self.project_root = project_root
         self.project_id = get_project_id(project_root)

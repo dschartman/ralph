@@ -10,11 +10,8 @@ from claude_agent_sdk.types import ResultMessage
 
 from ralph2.agents.models import ExecutorResult
 from ralph2.agents.streaming import stream_agent_output
+from ralph2.agents.constants import AGENT_MODEL
 from ralph2.git import GitBranchManager
-
-
-# Model to use for all agents
-AGENT_MODEL = "claude-opus-4-5"
 
 
 EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Ralph2 multi-agent system.
@@ -315,6 +312,7 @@ async def run_executor(
     memory: str = "",
     work_item_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    worktree_path: Optional[str] = None,
 ) -> dict:
     """
     Run the Executor agent.
@@ -325,6 +323,9 @@ async def run_executor(
         memory: Project memory content
         work_item_id: Optional work item ID from Trace (for parallel execution)
         run_id: Optional run ID (required if work_item_id is provided, for worktree path isolation)
+        worktree_path: Optional pre-created worktree path (orchestrator-managed mode).
+                       When provided, the executor uses this path directly and does NOT
+                       handle merge or cleanup - the orchestrator handles those.
 
     Returns:
         dict with keys: 'result' (ExecutorResult), 'full_output' (str), 'messages' (list)
@@ -383,10 +384,16 @@ async def run_executor(
         }
     )
 
-    # If no work_item_id, run without git isolation
+    # Mode 1: Orchestrator-managed worktree (parallel execution)
+    # When worktree_path is provided, use it directly - no merge/cleanup
+    if worktree_path:
+        return await _run_executor_with_orchestrator_worktree(prompt, options, worktree_path)
+
+    # Mode 2: No git isolation (single executor, no work_item_id)
     if not work_item_id:
         return await _run_executor_without_isolation(prompt, options)
 
+    # Mode 3: Executor-managed worktree (backward compatibility)
     # Use GitBranchManager for git isolation with guaranteed cleanup
     # run_id is required for worktree path isolation in parallel execution
     effective_run_id = run_id or "default"
@@ -398,6 +405,72 @@ async def run_executor(
     )
 
     return await _run_executor_with_git_isolation(prompt, options, git_manager)
+
+
+async def _run_executor_with_orchestrator_worktree(
+    prompt: str,
+    options: ClaudeAgentOptions,
+    worktree_path: str,
+) -> dict:
+    """Run executor in an orchestrator-managed worktree.
+
+    In this mode:
+    - Worktree already exists (created by orchestrator)
+    - Executor works and commits in the worktree
+    - Executor does NOT merge or cleanup (orchestrator handles those)
+
+    This is the preferred mode for parallel execution because:
+    - All worktrees are created before any executor runs
+    - All merges happen serially after all executors complete
+    - All cleanup is guaranteed even if executors fail
+
+    Args:
+        prompt: The prompt to send to the agent
+        options: Agent options
+        worktree_path: Path to the pre-created worktree
+
+    Returns:
+        dict with executor results
+    """
+    # Create options with cwd set to worktree path
+    options_with_cwd = ClaudeAgentOptions(
+        model=options.model,
+        allowed_tools=options.tools,
+        permission_mode=options.permission_mode,
+        system_prompt=options.system_prompt,
+        output_format=options.output_format,
+        cwd=worktree_path,
+    )
+
+    try:
+        result, full_text, messages = await _run_executor_agent(prompt, options_with_cwd)
+    except Exception as e:
+        print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
+        result = None
+        full_text = ""
+        messages = []
+
+    # If we didn't get a valid result, create a default
+    if result is None:
+        print(f"\033[33mWarning: No structured output received, using default Completed\033[0m")
+        result = ExecutorResult(
+            status="Completed",
+            what_was_done="Work completed (no structured output received)",
+            work_committed=False,
+            traces_updated=False
+        )
+
+    # Verify and remediate work_committed status
+    # This is critical - uncommitted changes will be lost when worktree is cleaned up
+    result = await _verify_and_remediate_commit(result, options_with_cwd, worktree_path)
+
+    # NOTE: We do NOT merge or cleanup here - the orchestrator handles that
+    # This allows:
+    # 1. All executors to complete before any merge
+    # 2. Merges to happen serially (no race conditions)
+    # 3. Guaranteed cleanup even if some executors fail
+
+    return _build_executor_response(result, full_text, messages)
 
 
 async def _run_executor_without_isolation(prompt: str, options: ClaudeAgentOptions) -> dict:
@@ -439,6 +512,10 @@ async def _run_executor_with_git_isolation(
 
     Uses context manager pattern for guaranteed cleanup.
 
+    IMPORTANT: This function does NOT use os.chdir() because that mutates shared
+    process state and causes race conditions when multiple executors run in parallel.
+    Instead, we pass the worktree path via the cwd parameter to ClaudeAgentOptions.
+
     Args:
         prompt: The prompt to send to the agent
         options: Agent options
@@ -447,7 +524,6 @@ async def _run_executor_with_git_isolation(
     Returns:
         dict with executor results
     """
-    original_cwd = os.getcwd()
     result = None
     full_text = ""
     messages = []
@@ -457,19 +533,24 @@ async def _run_executor_with_git_isolation(
         with git_manager:
             worktree_path = git_manager.worktree_path
 
-            # Change to the worktree directory so the agent works in isolation
-            os.chdir(worktree_path)
+            # Create new options with cwd set to worktree path
+            # This avoids os.chdir() which causes race conditions in parallel execution
+            options_with_cwd = ClaudeAgentOptions(
+                model=options.model,
+                allowed_tools=options.tools,
+                permission_mode=options.permission_mode,
+                system_prompt=options.system_prompt,
+                output_format=options.output_format,
+                cwd=worktree_path,
+            )
 
             try:
-                result, full_text, messages = await _run_executor_agent(prompt, options)
+                result, full_text, messages = await _run_executor_agent(prompt, options_with_cwd)
             except Exception as e:
                 print(f"\033[33mWarning: Agent query ended with error: {e}\033[0m")
                 result = None
                 full_text = ""
                 messages = []
-            finally:
-                # Restore working directory before context manager cleanup
-                os.chdir(original_cwd)
 
             # If we didn't get a valid result, create a default
             if result is None:
@@ -482,13 +563,14 @@ async def _run_executor_with_git_isolation(
                 )
 
             # Verify and remediate work_committed status
+            # Use options_with_cwd so any follow-up agent calls also work in the worktree
             result = await _verify_and_remediate_commit(
-                result, options, git_manager.worktree_path
+                result, options_with_cwd, git_manager.worktree_path
             )
 
             # Handle merge/cleanup based on status
             if result.status == "Completed":
-                result = await _handle_completed_status(result, options, git_manager)
+                result = await _handle_completed_status(result, options_with_cwd, git_manager)
             else:
                 # Status is Blocked or Uncertain - worktree will be cleaned up by context manager
                 result = _handle_non_completed_status(result)

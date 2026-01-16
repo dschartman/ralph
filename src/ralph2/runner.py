@@ -37,34 +37,6 @@ class IterationContext:
     iteration_plan: Optional[Dict[str, Any]] = None
 
 
-def validate_work_item_id(work_item_id: str) -> bool:
-    """
-    Validate that a work item ID matches expected format.
-
-    Work item IDs can be in formats like:
-    - "ralph-1abc23" (standard format)
-    - "tmpro-ddk9g-b2fi3m" (multiple segments, e.g., from temp directories)
-    - "ralph2-executor-ralph-0ikoux" (nested/compound IDs)
-
-    This validation prevents command injection and path traversal attacks
-    while allowing the various ID formats Trace generates.
-
-    Args:
-        work_item_id: The work item ID to validate
-
-    Returns:
-        True if valid, False otherwise
-    """
-    if not work_item_id:
-        return False
-
-    # Allow alphanumeric segments separated by hyphens or underscores
-    # Must start with a letter, no special characters (no path separators, shell metacharacters)
-    # Segments can be alphanumeric, separated by hyphens
-    pattern = r'^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)+$'
-    return bool(re.match(pattern, work_item_id))
-
-
 def _extract_spec_title(spec_content: str) -> str:
     """
     Extract the title from spec content.
@@ -89,31 +61,72 @@ def _extract_spec_title(spec_content: str) -> str:
 class Ralph2Runner:
     """Orchestrates the Ralph2 multi-agent iteration loop."""
 
-    def __init__(self, spec_path: str, project_context: ProjectContext, root_work_item_id: Optional[str] = None):
+    @staticmethod
+    def validate_work_item_id(work_item_id: str) -> bool:
+        """
+        Validate that a work item ID matches expected format.
+
+        Work item IDs can be in formats like:
+        - "ralph-1abc23" (standard format)
+        - "tmpro-ddk9g-b2fi3m" (multiple segments, e.g., from temp directories)
+        - "ralph2-executor-ralph-0ikoux" (nested/compound IDs)
+
+        This validation prevents command injection and path traversal attacks
+        while allowing the various ID formats Trace generates.
+
+        Args:
+            work_item_id: The work item ID to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if not work_item_id:
+            return False
+
+        # Allow alphanumeric segments separated by hyphens or underscores
+        # Must start with a letter, no special characters (no path separators, shell metacharacters)
+        # Segments can be alphanumeric, separated by hyphens
+        pattern = r'^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)+$'
+        return bool(re.match(pattern, work_item_id))
+
+    def __init__(
+        self,
+        spec_path: Optional[str],
+        project_context: ProjectContext,
+        root_work_item_id: Optional[str] = None,
+        spec_content: Optional[str] = None
+    ):
         """
         Initialize Ralph2 runner.
 
         Args:
-            spec_path: Path to the Ralph2file (spec)
+            spec_path: Path to the Ralph2file (spec), or None if spec_content provided
             project_context: ProjectContext with paths for state storage
             root_work_item_id: Optional root work item ID (spec milestone in Trace)
+            spec_content: Optional spec content (used when running from work item)
 
         Raises:
             ValueError: If root_work_item_id is provided but has invalid format
+            ValueError: If neither spec_path nor spec_content is provided
         """
-        self.spec_path = spec_path
+        self.spec_path = spec_path or f"trace:{root_work_item_id}"
         self.project_context = project_context
 
         # Validate root_work_item_id format before any subprocess calls
-        if root_work_item_id is not None and not validate_work_item_id(root_work_item_id):
+        if root_work_item_id is not None and not self.validate_work_item_id(root_work_item_id):
             raise ValueError(f"Invalid work item ID format: {root_work_item_id}")
 
         self.db = Ralph2DB(str(project_context.db_path))
         self.root_work_item_id = root_work_item_id
 
-        # Load spec content
-        with open(spec_path, 'r') as f:
-            self.spec_content = f.read()
+        # Load spec content from file or use provided content
+        if spec_content:
+            self.spec_content = spec_content
+        elif spec_path:
+            with open(spec_path, 'r') as f:
+                self.spec_content = f.read()
+        else:
+            raise ValueError("Either spec_path or spec_content must be provided")
 
         # Output directory is managed by ProjectContext
         self.output_dir = project_context.outputs_dir
@@ -1041,6 +1054,23 @@ class Ralph2Runner:
     def close(self):
         """Close database connection."""
         self.db.close()
+
+
+# Module-level wrapper for backward compatibility with existing tests
+def validate_work_item_id(work_item_id: str) -> bool:
+    """
+    Validate that a work item ID matches expected format.
+
+    This is a module-level wrapper around Ralph2Runner.validate_work_item_id()
+    for backward compatibility.
+
+    Args:
+        work_item_id: The work item ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    return Ralph2Runner.validate_work_item_id(work_item_id)
 
 
 async def run_ralph2(spec_path: str = "Ralph2file", max_iterations: int = 50) -> str:

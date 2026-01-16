@@ -9,10 +9,7 @@ from claude_agent_sdk.types import ResultMessage
 
 from ralph2.agents.models import SpecialistResult, FeedbackItem
 from ralph2.agents.streaming import stream_agent_output
-
-
-# Model to use for all agents
-AGENT_MODEL = "claude-opus-4-5"
+from ralph2.agents.constants import AGENT_MODEL
 
 
 class Specialist(ABC):

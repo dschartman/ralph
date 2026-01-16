@@ -1,15 +1,16 @@
 """Tests for Executor git worktree isolation.
 
-This tests the NEW worktree-based implementation that provides
+This tests the worktree-based implementation that provides
 true filesystem isolation for parallel executors.
+
+Tests verify that:
+- Executor uses cwd parameter instead of os.chdir() to avoid race conditions
+- Git worktrees are created/cleaned up properly via GitBranchManager
 """
 
 import pytest
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
-import subprocess
+import asyncio
+from unittest.mock import MagicMock, patch, AsyncMock
 
 from ralph2.agents.executor import run_executor
 
@@ -30,25 +31,26 @@ class TestExecutorGitWorktrees:
             result.stderr = ""
             return result
 
+        mock_result = MagicMock()
+        mock_result.status = "Completed"
+        mock_result.what_was_done = "Created worktree and worked"
+        mock_result.blockers = None
+        mock_result.notes = None
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = True
+        mock_result.traces_updated = True
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            # Mock os.chdir and os.getcwd to avoid actual filesystem changes
-            with patch('os.chdir'):
-                with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.getcwd', return_value='/mock/repo'):
+                with patch('ralph2.agents.executor._run_executor_agent', new_callable=AsyncMock) as mock_agent:
+                    mock_agent.return_value = (mock_result, "output", [])
 
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Created worktree and worked\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                        msg.result = "Work done"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                        result = await run_executor(
-                            iteration_intent="Test task",
-                            spec_content="Test spec",
-                            memory="",
-                            work_item_id="ralph-abc123"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test task",
+                        spec_content="Test spec",
+                        memory="",
+                        work_item_id="ralph-abc123"
+                    )
 
         # Verify NO git checkout -b commands (old approach)
         checkout_create_cmds = [cmd for cmd in git_commands if 'checkout' in ' '.join(cmd) and '-b' in cmd]
@@ -63,13 +65,16 @@ class TestExecutorGitWorktrees:
         assert 'ralph2/ralph-abc123' in ' '.join(worktree_cmd), f"Branch name incorrect in worktree command: {worktree_cmd}"
 
     @pytest.mark.asyncio
-    async def test_executor_passes_worktree_path_to_agent(self):
-        """Test that executor changes working directory to the worktree before running the agent."""
-        git_commands = []
+    async def test_executor_passes_cwd_to_agent_instead_of_os_chdir(self):
+        """Test that executor passes cwd parameter to agent options instead of calling os.chdir().
+
+        This is the key fix for the parallel executor race condition - we MUST NOT
+        use os.chdir() because it mutates shared process state.
+        """
+        captured_options = []
         chdir_calls = []
 
         def mock_subprocess_run(cmd, *args, **kwargs):
-            git_commands.append(cmd)
             result = MagicMock()
             result.returncode = 0
             result.stdout = ""
@@ -79,18 +84,24 @@ class TestExecutorGitWorktrees:
         def mock_chdir(path):
             chdir_calls.append(path)
 
+        mock_result = MagicMock()
+        mock_result.status = "Completed"
+        mock_result.what_was_done = "Work done"
+        mock_result.blockers = None
+        mock_result.notes = None
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = True
+        mock_result.traces_updated = True
+
+        async def capturing_run_agent(prompt, options):
+            captured_options.append(options)
+            return (mock_result, "output", [])
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            with patch('os.chdir', side_effect=mock_chdir):
+            # Patch os.chdir to track if it's called (it should NOT be)
+            with patch('ralph2.agents.executor.os.chdir', side_effect=mock_chdir):
                 with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
-
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                        msg.result = "Work done"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
+                    with patch('ralph2.agents.executor._run_executor_agent', side_effect=capturing_run_agent):
                         result = await run_executor(
                             iteration_intent="Test task",
                             spec_content="Test spec",
@@ -98,10 +109,14 @@ class TestExecutorGitWorktrees:
                             work_item_id="ralph-test1"
                         )
 
-        # Verify that chdir was called to switch to worktree and back
-        assert len(chdir_calls) >= 1, "Should have called os.chdir to change to worktree"
-        # First call should be to the worktree directory
-        assert 'ralph-test1' in chdir_calls[0], f"First chdir should be to worktree, got: {chdir_calls[0]}"
+        # CRITICAL: os.chdir should NOT be called anymore
+        assert len(chdir_calls) == 0, f"os.chdir should not be called, but was called with: {chdir_calls}"
+
+        # Agent options should have cwd set to the worktree path
+        assert len(captured_options) > 0, "Agent should have been called with options"
+        agent_options = captured_options[0]
+        assert agent_options.cwd is not None, "Agent options should have cwd set"
+        assert 'ralph-test1' in agent_options.cwd, f"cwd should point to worktree for ralph-test1, got: {agent_options.cwd}"
 
     @pytest.mark.asyncio
     async def test_executor_merges_from_worktree_on_success(self):
@@ -116,24 +131,26 @@ class TestExecutorGitWorktrees:
             result.stderr = ""
             return result
 
+        mock_result = MagicMock()
+        mock_result.status = "Completed"
+        mock_result.what_was_done = "Work done"
+        mock_result.blockers = None
+        mock_result.notes = None
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = True
+        mock_result.traces_updated = True
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            with patch('os.chdir'):
-                with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.getcwd', return_value='/mock/repo'):
+                with patch('ralph2.agents.executor._run_executor_agent', new_callable=AsyncMock) as mock_agent:
+                    mock_agent.return_value = (mock_result, "output", [])
 
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                        msg.result = "Work done"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                        result = await run_executor(
-                            iteration_intent="Test task",
-                            spec_content="Test spec",
-                            memory="",
-                            work_item_id="ralph-merge1"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test task",
+                        spec_content="Test spec",
+                        memory="",
+                        work_item_id="ralph-merge1"
+                    )
 
         # Verify merge command was issued
         merge_cmds = [cmd for cmd in git_commands if 'merge' in ' '.join(cmd)]
@@ -156,24 +173,26 @@ class TestExecutorGitWorktrees:
             result.stderr = ""
             return result
 
+        mock_result = MagicMock()
+        mock_result.status = "Completed"
+        mock_result.what_was_done = "Work done"
+        mock_result.blockers = None
+        mock_result.notes = None
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = True
+        mock_result.traces_updated = True
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            with patch('os.chdir'):
-                with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.getcwd', return_value='/mock/repo'):
+                with patch('ralph2.agents.executor._run_executor_agent', new_callable=AsyncMock) as mock_agent:
+                    mock_agent.return_value = (mock_result, "output", [])
 
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                        msg.result = "Work done"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                        result = await run_executor(
-                            iteration_intent="Test task",
-                            spec_content="Test spec",
-                            memory="",
-                            work_item_id="ralph-cleanup1"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test task",
+                        spec_content="Test spec",
+                        memory="",
+                        work_item_id="ralph-cleanup1"
+                    )
 
         # Verify worktree remove command was issued
         worktree_remove_cmds = [cmd for cmd in git_commands if 'worktree' in ' '.join(cmd) and 'remove' in ' '.join(cmd)]
@@ -192,24 +211,26 @@ class TestExecutorGitWorktrees:
             result.stderr = ""
             return result
 
+        mock_result = MagicMock()
+        mock_result.status = "Blocked"
+        mock_result.what_was_done = "Partial work"
+        mock_result.blockers = "Missing dependency"
+        mock_result.notes = "Cannot proceed"
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = False
+        mock_result.traces_updated = True
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            with patch('os.chdir'):
-                with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.getcwd', return_value='/mock/repo'):
+                with patch('ralph2.agents.executor._run_executor_agent', new_callable=AsyncMock) as mock_agent:
+                    mock_agent.return_value = (mock_result, "output", [])
 
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Blocked\nWhat was done: Partial work\nBlockers: Missing dependency\nNotes: Cannot proceed\nEfficiency Notes: None")]
-                        msg.result = "Blocked"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                        result = await run_executor(
-                            iteration_intent="Test task",
-                            spec_content="Test spec",
-                            memory="",
-                            work_item_id="ralph-blocked1"
-                        )
+                    result = await run_executor(
+                        iteration_intent="Test task",
+                        spec_content="Test spec",
+                        memory="",
+                        work_item_id="ralph-blocked1"
+                    )
 
         # Verify worktree remove command was issued
         worktree_remove_cmds = [cmd for cmd in git_commands if 'worktree' in ' '.join(cmd) and 'remove' in ' '.join(cmd)]
@@ -227,9 +248,7 @@ class TestExecutorGitWorktrees:
         def mock_subprocess_run(cmd, *args, **kwargs):
             # Capture worktree paths from 'git worktree add' commands
             if 'worktree' in ' '.join(cmd) and 'add' in ' '.join(cmd):
-                # Extract the path (second argument after 'add')
                 cmd_str = ' '.join(cmd)
-                # Simple extraction - in real command would be like: git worktree add /path/to/worktree branch
                 worktree_paths.append(cmd_str)
 
             result = MagicMock()
@@ -238,34 +257,35 @@ class TestExecutorGitWorktrees:
             result.stderr = ""
             return result
 
+        mock_result = MagicMock()
+        mock_result.status = "Completed"
+        mock_result.what_was_done = "Work done"
+        mock_result.blockers = None
+        mock_result.notes = None
+        mock_result.efficiency_notes = None
+        mock_result.work_committed = True
+        mock_result.traces_updated = True
+
         with patch('subprocess.run', side_effect=mock_subprocess_run):
-            with patch('os.chdir'):
-                with patch('os.getcwd', return_value='/mock/repo'):
-                    async def mock_query(*args, **kwargs):
-                        from claude_agent_sdk.types import AssistantMessage, TextBlock
+            with patch('os.getcwd', return_value='/mock/repo'):
+                with patch('ralph2.agents.executor._run_executor_agent', new_callable=AsyncMock) as mock_agent:
+                    mock_agent.return_value = (mock_result, "output", [])
 
-                        msg = MagicMock(spec=AssistantMessage)
-                        msg.content = [MagicMock(spec=TextBlock, text="EXECUTOR_SUMMARY:\nStatus: Completed\nWhat was done: Work done\nBlockers: None\nNotes: Test\nEfficiency Notes: None")]
-                        msg.result = "Work done"
-                        yield msg
-
-                    with patch('ralph2.agents.executor.query', side_effect=mock_query):
-                        # Simulate two executors running in parallel
-                        import asyncio
-                        results = await asyncio.gather(
-                            run_executor(
-                                iteration_intent="Task 1",
-                                spec_content="Test spec",
-                                memory="",
-                                work_item_id="ralph-task1"
-                            ),
-                            run_executor(
-                                iteration_intent="Task 2",
-                                spec_content="Test spec",
-                                memory="",
-                                work_item_id="ralph-task2"
-                            )
+                    # Simulate two executors running in parallel
+                    results = await asyncio.gather(
+                        run_executor(
+                            iteration_intent="Task 1",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-task1"
+                        ),
+                        run_executor(
+                            iteration_intent="Task 2",
+                            spec_content="Test spec",
+                            memory="",
+                            work_item_id="ralph-task2"
                         )
+                    )
 
         # Verify we created separate worktrees for each executor
         assert len(worktree_paths) >= 2, "Should create separate worktrees for parallel executors"

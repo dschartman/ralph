@@ -1,6 +1,7 @@
 """CLI interface for Ralph2 using Typer."""
 
 import asyncio
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -14,6 +15,13 @@ from .state.db import Ralph2DB
 from .state.models import HumanInput
 from .project import ProjectContext, ensure_ralph2_id_in_gitignore, find_project_root
 
+# Configure logging so warnings are visible (e.g., cleanup failures in git.py)
+# Use WARNING level by default to avoid noise, but ensure critical warnings are shown
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(levelname)s: %(name)s: %(message)s",
+)
+
 app = typer.Typer(help="Ralph2 - Multi-Agent Architecture for Spec-Driven Development")
 console = Console()
 
@@ -26,7 +34,7 @@ def _validate_prerequisites() -> bool:
     1. Running inside a git repository
     2. trc command is available
     3. Initializes Trace if needed
-    4. Adds .temper/ to .gitignore
+    4. Adds .ralph2-id to .gitignore
 
     Returns:
         True if all prerequisites are met, False otherwise
@@ -92,30 +100,76 @@ def _validate_prerequisites() -> bool:
     return True
 
 
+def _get_work_item_spec(work_item_id: str) -> Optional[str]:
+    """Fetch work item description from trace to use as spec."""
+    try:
+        result = subprocess.run(
+            ["trc", "show", work_item_id],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Parse the output to extract title and description
+        lines = result.stdout.strip().split('\n')
+        title = ""
+        description_lines = []
+        in_description = False
+
+        for line in lines:
+            if line.startswith("Title:"):
+                title = line.replace("Title:", "").strip()
+            elif line.startswith("Description:"):
+                in_description = True
+            elif in_description and not line.startswith("Children:"):
+                description_lines.append(line)
+            elif line.startswith("Children:"):
+                break
+
+        description = '\n'.join(description_lines).strip()
+        return f"# {title}\n\n{description}" if description else f"# {title}"
+    except subprocess.CalledProcessError:
+        return None
+
+
 @app.command()
 def run(
-    spec_path: str = typer.Argument("Ralph2file", help="Path to the Ralph2file (spec)"),
+    spec_path: Optional[str] = typer.Argument(None, help="Path to the Ralph2file (spec)"),
     max_iterations: int = typer.Option(50, help="Maximum number of iterations to run"),
     root_work_item: Optional[str] = typer.Option(None, "--root-work-item", help="Root work item ID (spec milestone in Trace)")
 ):
     """
     Run Ralph2 with the given spec.
 
-    Requires a Ralph2file in the current directory or provide a path.
+    Either provide a Ralph2file path or use --root-work-item to use a Trace work item as the spec.
     """
     # Validate prerequisites
     if not _validate_prerequisites():
         raise typer.Exit(1)
 
-    # Check if spec file exists
-    if not Path(spec_path).exists():
-        console.print(f"[red]Error:[/red] Spec file not found: {spec_path}")
-        console.print("\nRalph2 requires a Ralph2file to run.")
-        raise typer.Exit(1)
+    # Determine spec source
+    spec_content = None
+    effective_spec_path = spec_path or "Ralph2file"
+
+    if root_work_item:
+        # Try to use work item description as spec
+        spec_content = _get_work_item_spec(root_work_item)
+        if spec_content:
+            console.print(f"[dim]Using work item {root_work_item} as spec[/dim]")
+        elif not spec_path and not Path("Ralph2file").exists():
+            console.print(f"[red]Error:[/red] Could not fetch work item {root_work_item} and no Ralph2file found.")
+            raise typer.Exit(1)
+
+    # Fall back to spec file if no work item spec
+    if not spec_content:
+        if not Path(effective_spec_path).exists():
+            console.print(f"[red]Error:[/red] Spec file not found: {effective_spec_path}")
+            console.print("\nRalph2 requires a Ralph2file or --root-work-item to run.")
+            raise typer.Exit(1)
 
     # Get project context
     try:
-        ctx = ProjectContext()
+        # Don't require spec file if we have spec content from work item
+        ctx = ProjectContext(require_spec=not bool(spec_content))
         console.print(f"[dim]Project ID: {ctx.project_id}[/dim]")
         console.print(f"[dim]State dir: {ctx.state_dir}[/dim]")
     except ValueError as e:
@@ -124,7 +178,12 @@ def run(
 
     # Run Ralph2
     try:
-        runner = Ralph2Runner(spec_path, ctx, root_work_item_id=root_work_item)
+        runner = Ralph2Runner(
+            spec_path=effective_spec_path if not spec_content else None,
+            project_context=ctx,
+            root_work_item_id=root_work_item,
+            spec_content=spec_content
+        )
         status = asyncio.run(runner.run(max_iterations))
 
         if status == "completed":
