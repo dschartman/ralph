@@ -309,7 +309,8 @@ async def test_automatic_root_work_item_creation(test_repo, project_context):
                 text=True,
                 check=True
             )
-            root_work_item_id = result.stdout.strip().split()[-1]
+            output_line = result.stdout.strip().split('\n')[-1]
+            root_work_item_id = output_line.split()[1].rstrip(':')
             root_work_item_created = True
 
             # Return CONTINUE to allow verifier to run
@@ -431,7 +432,8 @@ async def test_specialist_feedback_creates_work_items(test_repo, project_context
                 text=True,
                 check=True
             )
-            work_item_id = result.stdout.strip().split()[-1]
+            output_line = result.stdout.strip().split('\n')[-1]
+            work_item_id = output_line.split()[1].rstrip(':')
             feedback_work_items.append(work_item_id)
 
         return {

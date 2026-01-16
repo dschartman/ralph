@@ -64,6 +64,73 @@ class Ralph2Runner:
         # Output directory is managed by ProjectContext
         self.output_dir = project_context.outputs_dir
 
+    def _ensure_root_work_item(self) -> str:
+        """
+        Ensure a root work item exists for this spec.
+
+        If root_work_item_id was provided at initialization, use it.
+        Otherwise, check if a previous run has a root work item and reuse it.
+        If not, create a new root work item from the spec title.
+
+        Returns:
+            The root work item ID
+
+        Raises:
+            RuntimeError: If unable to create or verify the root work item
+        """
+        # If explicitly provided, use it
+        if self.root_work_item_id:
+            return self.root_work_item_id
+
+        # Check if a previous run has a root work item
+        existing_run = self.db.get_latest_run()
+        if existing_run and existing_run.root_work_item_id:
+            # Verify it still exists in Trace
+            try:
+                result = subprocess.run(
+                    ["trc", "show", existing_run.root_work_item_id],
+                    cwd=self.project_context.project_root,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    self.root_work_item_id = existing_run.root_work_item_id
+                    return self.root_work_item_id
+            except Exception as e:
+                print(f"   ⚠️  Warning: Could not verify existing root work item: {e}")
+
+        # Create a new root work item
+        spec_title = _extract_spec_title(self.spec_content)
+
+        try:
+            result = subprocess.run(
+                ["trc", "create", spec_title, "--description", self.spec_content[:500]],
+                cwd=self.project_context.project_root,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            # Extract work item ID from output (usually last word)
+            output = result.stdout.strip()
+            work_item_id = output.split()[-1]
+
+            # Verify it looks like a valid work item ID
+            if not work_item_id.startswith("ralph-"):
+                raise RuntimeError(f"Invalid work item ID format: {work_item_id}")
+
+            self.root_work_item_id = work_item_id
+            print(f"   📋 Created root work item: {work_item_id}")
+
+            return work_item_id
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to create root work item: {e.stderr}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to create root work item: {e}") from e
+
+
     def _save_agent_messages(self, iteration_id: int, agent_type: str, messages: list) -> str:
         """
         Save agent messages to a JSONL file.
@@ -211,6 +278,18 @@ class Ralph2Runner:
             last_executor_summary = None
             last_verifier_assessment = None
             last_specialist_feedback = None
+
+        # Ensure root work item exists and is stored
+        try:
+            root_work_item_id = self._ensure_root_work_item()
+            # Store it in the current run if not already stored
+            current_run = self.db.get_run(run_id)
+            if current_run and not current_run.root_work_item_id:
+                self.db.update_run_root_work_item(run_id, root_work_item_id)
+        except RuntimeError as e:
+            print(f"   ❌ Error setting up root work item: {e}")
+            self.db.update_run_status(run_id, "stuck", datetime.now())
+            return "stuck"
 
         # Read project memory
         memory = read_memory(self.project_context.project_id)
