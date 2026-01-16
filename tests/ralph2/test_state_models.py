@@ -478,3 +478,140 @@ class TestRalph2DBClose:
         assert db._closed is False
 
         db.close()
+
+
+class TestRalph2DBUpdateIterationIntent:
+    """Tests for Ralph2DB.update_iteration_intent() - spec requirement: 'Database operations use transaction boundaries for multi-step operations' and 'Direct SQL execution bypasses database abstraction'."""
+
+    def test_update_iteration_intent_exists(self, tmp_path):
+        """Test that update_iteration_intent method exists on Ralph2DB."""
+        from ralph2.state.db import Ralph2DB
+
+        db_path = str(tmp_path / "test_intent.db")
+        db = Ralph2DB(db_path)
+
+        assert hasattr(db, 'update_iteration_intent')
+        assert callable(getattr(db, 'update_iteration_intent'))
+
+        db.close()
+
+    def test_update_iteration_intent_updates_intent(self, tmp_path):
+        """Test that update_iteration_intent correctly updates the intent field."""
+        from ralph2.state.db import Ralph2DB
+        from ralph2.state.models import Run, Iteration
+        from datetime import datetime
+
+        db_path = str(tmp_path / "test_intent_update.db")
+        db = Ralph2DB(db_path)
+
+        # Create a run first
+        run = Run(
+            id="test-run-123",
+            spec_path="/path/to/spec.md",
+            spec_content="# Test Spec",
+            status="running",
+            config={},
+            started_at=datetime.now()
+        )
+        db.create_run(run)
+
+        # Create an iteration with empty intent
+        iteration = Iteration(
+            id=None,
+            run_id="test-run-123",
+            number=1,
+            intent="",  # Empty initially
+            outcome="continue",
+            started_at=datetime.now()
+        )
+        iteration = db.create_iteration(iteration)
+
+        # Update the intent
+        db.update_iteration_intent(iteration.id, "New iteration intent")
+
+        # Verify the intent was updated
+        updated_iteration = db.get_iteration(iteration.id)
+        assert updated_iteration.intent == "New iteration intent"
+
+        db.close()
+
+    def test_update_iteration_intent_respects_transactions(self, tmp_path):
+        """Test that update_iteration_intent respects transaction boundaries."""
+        from ralph2.state.db import Ralph2DB
+        from ralph2.state.models import Run, Iteration
+        from datetime import datetime
+
+        db_path = str(tmp_path / "test_intent_txn.db")
+        db = Ralph2DB(db_path)
+
+        # Create run and iteration
+        run = Run(
+            id="test-run-txn",
+            spec_path="/path/to/spec.md",
+            spec_content="# Test",
+            status="running",
+            config={},
+            started_at=datetime.now()
+        )
+        db.create_run(run)
+
+        iteration = Iteration(
+            id=None,
+            run_id="test-run-txn",
+            number=1,
+            intent="original",
+            outcome="continue",
+            started_at=datetime.now()
+        )
+        iteration = db.create_iteration(iteration)
+
+        # Update within a transaction
+        with db.transaction():
+            db.update_iteration_intent(iteration.id, "updated in txn")
+
+        # Verify update persisted
+        updated = db.get_iteration(iteration.id)
+        assert updated.intent == "updated in txn"
+
+        db.close()
+
+    def test_update_iteration_intent_auto_commits_outside_transaction(self, tmp_path):
+        """Test that update_iteration_intent auto-commits when outside a transaction."""
+        from ralph2.state.db import Ralph2DB
+        from ralph2.state.models import Run, Iteration
+        from datetime import datetime
+
+        db_path = str(tmp_path / "test_intent_auto.db")
+        db = Ralph2DB(db_path)
+
+        # Create run and iteration
+        run = Run(
+            id="test-run-auto",
+            spec_path="/path/to/spec.md",
+            spec_content="# Test",
+            status="running",
+            config={},
+            started_at=datetime.now()
+        )
+        db.create_run(run)
+
+        iteration = Iteration(
+            id=None,
+            run_id="test-run-auto",
+            number=1,
+            intent="original",
+            outcome="continue",
+            started_at=datetime.now()
+        )
+        iteration = db.create_iteration(iteration)
+
+        # Update outside any transaction - should auto-commit
+        db.update_iteration_intent(iteration.id, "auto-committed")
+
+        # Open a new connection to verify the data was committed
+        db2 = Ralph2DB(db_path)
+        updated = db2.get_iteration(iteration.id)
+        assert updated.intent == "auto-committed"
+
+        db.close()
+        db2.close()
