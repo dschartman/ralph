@@ -38,7 +38,8 @@ class Ralph2DB:
                 status TEXT NOT NULL,
                 config TEXT NOT NULL,
                 started_at TEXT NOT NULL,
-                ended_at TEXT
+                ended_at TEXT,
+                root_work_item_id TEXT
             )
         """)
 
@@ -81,14 +82,20 @@ class Ralph2DB:
             )
         """)
 
+        # Migration: Add root_work_item_id column to runs table if it doesn't exist
+        cursor.execute("PRAGMA table_info(runs)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "root_work_item_id" not in columns:
+            cursor.execute("ALTER TABLE runs ADD COLUMN root_work_item_id TEXT")
+
         self.conn.commit()
 
     def create_run(self, run: Run) -> Run:
         """Create a new run."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO runs (id, spec_path, spec_content, status, config, started_at, ended_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (id, spec_path, spec_content, status, config, started_at, ended_at, root_work_item_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run.id,
             run.spec_path,
@@ -96,7 +103,8 @@ class Ralph2DB:
             run.status,
             json.dumps(run.config),
             run.started_at.isoformat(),
-            run.ended_at.isoformat() if run.ended_at else None
+            run.ended_at.isoformat() if run.ended_at else None,
+            run.root_work_item_id
         ))
         self.conn.commit()
         return run
@@ -114,7 +122,8 @@ class Ralph2DB:
                 status=row["status"],
                 config=json.loads(row["config"]),
                 started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
             )
         return None
 
@@ -126,6 +135,16 @@ class Ralph2DB:
             SET status = ?, ended_at = ?
             WHERE id = ?
         """, (status, ended_at.isoformat() if ended_at else None, run_id))
+        self.conn.commit()
+
+    def update_run_root_work_item(self, run_id: str, root_work_item_id: str):
+        """Update run's root work item ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE runs
+            SET root_work_item_id = ?
+            WHERE id = ?
+        """, (root_work_item_id, run_id))
         self.conn.commit()
 
     def get_latest_run(self) -> Optional[Run]:
@@ -141,7 +160,8 @@ class Ralph2DB:
                 status=row["status"],
                 config=json.loads(row["config"]),
                 started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
             )
         return None
 
@@ -158,7 +178,8 @@ class Ralph2DB:
                 status=row["status"],
                 config=json.loads(row["config"]),
                 started_at=datetime.fromisoformat(row["started_at"]),
-                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+                root_work_item_id=row["root_work_item_id"] if "root_work_item_id" in row.keys() else None
             )
             for row in rows
         ]

@@ -1,6 +1,8 @@
 """Main iteration loop orchestration for Ralph2."""
 
 import asyncio
+import re
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -14,6 +16,28 @@ from .agents.executor import run_executor
 from .agents.verifier import run_verifier
 from .agents.specialist import CodeReviewerSpecialist, run_specialist
 from .project import ProjectContext, read_memory
+from .feedback import create_work_items_from_feedback
+
+
+def _extract_spec_title(spec_content: str) -> str:
+    """
+    Extract the title from spec content.
+
+    Looks for the first H1 heading (# Title) in the content.
+    If no H1 is found, returns "Spec" as default.
+
+    Args:
+        spec_content: The spec file content
+
+    Returns:
+        The extracted title or "Spec" as default
+    """
+    lines = spec_content.split('\n')
+    for line in lines:
+        if line.strip().startswith('# '):
+            # Remove the # and any leading/trailing whitespace
+            return line.strip()[2:].strip()
+    return "Spec"
 
 
 class Ralph2Runner:
@@ -470,6 +494,20 @@ class Ralph2Runner:
                 specialist_name = result["specialist_name"]
                 feedback_items = result.get("feedback", [])
                 print(f"   {specialist_name}: {len(feedback_items)} feedback items")
+
+                # Convert feedback items to Trace work items (if root work item exists)
+                if feedback_items and self.root_work_item_id:
+                    try:
+                        created_ids = create_work_items_from_feedback(
+                            feedback_items=feedback_items,
+                            specialist_name=specialist_name,
+                            root_work_item_id=self.root_work_item_id,
+                            project_root=str(self.project_context.project_root)
+                        )
+                        if created_ids:
+                            print(f"   → Created {len(created_ids)} work items from {specialist_name} feedback")
+                    except Exception as e:
+                        print(f"   ⚠️  Warning: Could not create work items from {specialist_name} feedback: {e}")
 
                 # Save specialist output
                 specialist_output_path = self._save_agent_messages(

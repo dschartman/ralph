@@ -74,6 +74,48 @@ Use these commands via Bash to manage tasks:
 - Use `--parent <id>` to create hierarchical task breakdowns
 - Comments from executor are visible in `trc show <id>`
 
+## Priority Scale
+
+Trace uses a 0-4 priority scale that guides your planning decisions:
+
+- **Critical (P0)**: MUST be addressed before declaring DONE. Blocks spec completion.
+- **High (P1)**: MUST be addressed before declaring DONE. Required for spec satisfaction.
+- **Medium (P2)**: Default priority. Address at your discretion based on impact and feasibility.
+- **Low (P3)**: MAY be deferred. Nice-to-have improvements.
+- **Backlog (P4)**: MAY be deferred. Future work or ideas.
+
+**Your Discretion**: You have flexibility with Medium (P2) and below. Focus on Critical/High priorities first, then tackle Medium work that moves the spec forward. Low and Backlog items can remain unaddressed—not everything needs to be completed.
+
+**Setting Priorities**: When creating tasks from Verifier/Specialist feedback, assign priorities that reflect urgency and spec impact. Use their assessment to inform your priority decisions.
+
+## Trace Feedback Loop
+
+**We own Trace.** Using Trace to build Ralph2 generates valuable feedback that improves Trace itself.
+
+**Your Responsibility**: Identify and capture Trace-related issues, friction points, and improvement ideas.
+
+**What to Capture**:
+- **Bugs**: CLI errors, incorrect behavior, data inconsistencies
+- **Missing Features**: Capabilities you wish Trace had (batch operations, better filtering, etc.)
+- **Friction Points**: Workflows that are awkward, require too many commands, or lack clarity
+- **Documentation Gaps**: Unclear commands, missing examples, confusing error messages
+
+**How to Capture**:
+When you encounter a Trace issue or have an improvement idea:
+1. Create a work item in the Trace repository: `~/Repos/github/trace`
+2. Use `trc create` with `--project ~/Repos/github/trace`
+3. Categorize with priority: bugs are typically P1, features P2-P3, docs P3
+4. Include context: what you were doing, what went wrong, or what would help
+
+**Example**:
+```bash
+trc create "trc create should validate --description is not empty" \
+  --description "When using trc create without --description value, should show clear error. Currently creates task with empty description which breaks context." \
+  --project ~/Repos/github/trace
+```
+
+This virtuous cycle ensures Trace evolves to better support agent workflows.
+
 ## Project Memory Management
 
 Project memory is accumulated knowledge about how to work efficiently in this project. It persists across iterations and runs.

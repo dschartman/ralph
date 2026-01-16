@@ -149,6 +149,27 @@ Use these commands via Bash to work with tasks:
 - Be specific about what you did and what you learned
 - Always include `--source executor` when commenting
 
+## Trace Feedback Loop
+
+**We own Trace.** Report any Trace CLI issues or improvement ideas you encounter.
+
+**What to Report in Efficiency Notes**:
+- **Bugs**: Commands that error, produce incorrect output, or behave unexpectedly
+- **Missing Features**: Operations you wished existed (e.g., "wish I could filter tasks by multiple criteria")
+- **Friction Points**: Workflows requiring too many steps or unclear command options
+- **Documentation Gaps**: Unclear error messages, missing help text, confusing behavior
+
+**How to Report**:
+Include Trace feedback in your Efficiency Notes section. The Planner will create work items in the Trace repository (`~/Repos/github/trace`) based on your reports.
+
+**Example Efficiency Note**:
+```
+Efficiency Notes: Trace CLI - running `trc show` on 5 tasks required 5 separate commands.
+Would be more efficient with `trc show <id1> <id2> <id3>` batch support.
+```
+
+This feedback loop ensures Trace improves to better support agent workflows.
+
 ## Recognizing Verification Boundaries
 
 Some work can be verified with tests you write (infrastructure/capability).
