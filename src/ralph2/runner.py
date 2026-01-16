@@ -112,12 +112,22 @@ class Ralph2Runner:
                 check=True
             )
 
-            # Extract work item ID from output (usually last word)
+            # Extract work item ID from output
+            # Expected format: "Created <id>: <title>"
             output = result.stdout.strip()
-            work_item_id = output.split()[-1]
+            if output.startswith("Created "):
+                # Extract the ID between "Created " and ":"
+                work_item_id = output.split()[1].rstrip(":")
+            else:
+                # Fallback: try to extract ID-like pattern
+                match = re.search(r'(\w+-\w+)', output)
+                if match:
+                    work_item_id = match.group(1)
+                else:
+                    raise RuntimeError(f"Could not extract work item ID from output: {output}")
 
-            # Verify it looks like a valid work item ID
-            if not work_item_id.startswith("ralph-"):
+            # Verify it looks like a valid work item ID (format: word-word)
+            if not re.match(r'\w+-\w+', work_item_id):
                 raise RuntimeError(f"Invalid work item ID format: {work_item_id}")
 
             self.root_work_item_id = work_item_id

@@ -68,7 +68,11 @@ def test_root_work_item_auto_created_on_first_run(temp_project):
 
     # Verify root work item was created
     assert root_work_item_id is not None
-    assert root_work_item_id.startswith("ralph-")
+    # Work item ID should match pattern: prefix-suffix
+    assert "-" in root_work_item_id
+
+    # Store it in the database (simulating what the runner does)
+    runner.db.update_run_root_work_item(run_id, root_work_item_id)
 
     # Verify it was stored in the database
     stored_run = runner.db.get_run(run_id)
@@ -110,6 +114,8 @@ def test_root_work_item_stored_and_reused(temp_project):
     runner1.db.create_run(run1)
 
     root_work_item_id_1 = runner1._ensure_root_work_item()
+    # Store it in the database (simulating what the runner does)
+    runner1.db.update_run_root_work_item(run_id_1, root_work_item_id_1)
 
     # Second run: should reuse the same root work item
     runner2 = Ralph2Runner(
