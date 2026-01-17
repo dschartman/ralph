@@ -92,28 +92,30 @@ class CriterionStatus(BaseModel):
 
 
 class VerifierResult(BaseModel):
-    """Structured output from the Verifier agent."""
-    outcome: Literal["DONE", "CONTINUE", "STUCK"] = Field(
-        description="Verification outcome: DONE (all criteria satisfied), CONTINUE (work remaining), STUCK (blocked)"
+    """Structured output from the Verifier agent.
+
+    The Verifier's job is ONLY to assess whether the spec is satisfied.
+    It does NOT decide CONTINUE/DONE/STUCK - that's the Planner's job.
+    """
+    spec_satisfied: Literal["yes", "no", "partially", "unverifiable"] = Field(
+        description="Is the spec satisfied? yes=all criteria met, no=criteria not met, partially=some met, unverifiable=cannot determine"
     )
     criteria_status: list[CriterionStatus] = Field(
         description="Status of each acceptance criterion"
     )
+    satisfied_count: int = Field(
+        description="Number of criteria that are satisfied"
+    )
+    total_count: int = Field(
+        description="Total number of acceptance criteria"
+    )
     gaps: Optional[list[str]] = Field(
         default=None,
-        description="List of unsatisfied criteria (if outcome is CONTINUE)"
+        description="List of criteria that are not yet satisfied"
     )
-    blocker: Optional[str] = Field(
+    unverifiable_criteria: Optional[list[str]] = Field(
         default=None,
-        description="What resources are needed to unblock (if outcome is STUCK)"
-    )
-    required_configuration: Optional[list[str]] = Field(
-        default=None,
-        description="Specific credentials or resources needed (if outcome is STUCK)"
-    )
-    recommendation: Optional[str] = Field(
-        default=None,
-        description="How user should provide resources to unblock (if outcome is STUCK)"
+        description="Criteria that cannot be verified with current resources (e.g., need external services)"
     )
     efficiency_notes: Optional[str] = Field(
         default=None,

@@ -133,15 +133,18 @@ def _get_work_item_spec(work_item_id: str) -> Optional[str]:
 
 @app.command()
 def run(
-    spec_path: Optional[str] = typer.Argument(None, help="Path to the Ralph2file (spec)"),
+    spec: Optional[str] = typer.Argument(None, help="Spec file path or inline spec content"),
     max_iterations: int = typer.Option(50, help="Maximum number of iterations to run"),
     root_work_item: Optional[str] = typer.Option(None, "--root-work-item", help="Root work item ID (spec milestone in Trace)"),
     branch: Optional[str] = typer.Option(None, "--branch", help="Milestone branch name (auto-generated from spec title if not provided)")
 ):
     """
-    Run Ralph2 with the given spec.
+    Run Ralph2 with a spec.
 
-    Either provide a Ralph2file path or use --root-work-item to use a Trace work item as the spec.
+    Provide exactly one of:
+      - A file path: ralph2 run myspec.md
+      - Inline content: ralph2 run "# My Spec\\n\\nDo something"
+      - A trace work item: ralph2 run --root-work-item ralph-abc123
 
     The --branch option specifies the milestone branch for this run. All executor work
     will be isolated to this branch. If not provided, a branch is auto-generated from
@@ -151,30 +154,37 @@ def run(
     if not _validate_prerequisites():
         raise typer.Exit(1)
 
-    # Determine spec source
+    # Determine spec source - must be explicit
     spec_content = None
-    effective_spec_path = spec_path or "Ralph2file"
+    spec_path = None
 
     if root_work_item:
-        # Try to use work item description as spec
+        # Use trace work item as spec
         spec_content = _get_work_item_spec(root_work_item)
-        if spec_content:
-            console.print(f"[dim]Using work item {root_work_item} as spec[/dim]")
-        elif not spec_path and not Path("Ralph2file").exists():
-            console.print(f"[red]Error:[/red] Could not fetch work item {root_work_item} and no Ralph2file found.")
+        if not spec_content:
+            console.print(f"[red]Error:[/red] Could not fetch work item {root_work_item}")
             raise typer.Exit(1)
+        console.print(f"[dim]Using work item {root_work_item} as spec[/dim]")
+    elif spec:
+        # Check if it's a file path or inline content
+        if Path(spec).exists():
+            spec_path = spec
+            console.print(f"[dim]Using spec file: {spec}[/dim]")
+        else:
+            # Treat as inline spec content
+            spec_content = spec
+            console.print("[dim]Using inline spec content[/dim]")
+    else:
+        console.print("[red]Error:[/red] No spec provided.")
+        console.print("\nUsage:")
+        console.print("  ralph2 run <file>              # Use a spec file")
+        console.print("  ralph2 run \"<content>\"         # Use inline spec content")
+        console.print("  ralph2 run --root-work-item ID # Use a Trace work item")
+        raise typer.Exit(1)
 
-    # Fall back to spec file if no work item spec
-    if not spec_content:
-        if not Path(effective_spec_path).exists():
-            console.print(f"[red]Error:[/red] Spec file not found: {effective_spec_path}")
-            console.print("\nRalph2 requires a Ralph2file or --root-work-item to run.")
-            raise typer.Exit(1)
-
-    # Get project context
+    # Get project context (always use git root, no Ralph2file search)
     try:
-        # Don't require spec file if we have spec content from work item
-        ctx = ProjectContext(require_spec=not bool(spec_content))
+        ctx = ProjectContext(require_spec=False)
         console.print(f"[dim]Project ID: {ctx.project_id}[/dim]")
         console.print(f"[dim]State dir: {ctx.state_dir}[/dim]")
     except ValueError as e:
@@ -184,7 +194,7 @@ def run(
     # Run Ralph2
     try:
         runner = Ralph2Runner(
-            spec_path=effective_spec_path if not spec_content else None,
+            spec_path=spec_path,
             project_context=ctx,
             root_work_item_id=root_work_item,
             spec_content=spec_content,

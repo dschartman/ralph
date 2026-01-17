@@ -369,3 +369,71 @@ class TestCLIBranchOption:
         # This tests acceptance criterion:
         # WHEN run status is queried, THEN milestone branch name is displayed
         pass  # Will implement after adding to status command
+
+
+class TestFreshRepoHandling:
+    """Tests for handling fresh repositories with no commits."""
+
+    def test_repo_has_commits_returns_false_for_empty_repo(self):
+        """Test repo_has_commits returns False for repo with no commits."""
+        from ralph2.runner import repo_has_commits
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize empty repo
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            assert not repo_has_commits(tmpdir)
+
+    def test_repo_has_commits_returns_true_for_repo_with_commits(self):
+        """Test repo_has_commits returns True for repo with commits."""
+        from ralph2.runner import repo_has_commits
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize repo with a commit
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "Test"], cwd=tmpdir, capture_output=True)
+            assert repo_has_commits(tmpdir)
+
+    def test_ensure_repo_has_commits_creates_initial_commit(self):
+        """Test ensure_repo_has_commits creates initial commit on fresh repo."""
+        from ralph2.runner import ensure_repo_has_commits, repo_has_commits
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize empty repo
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, capture_output=True)
+
+            # Verify empty
+            assert not repo_has_commits(tmpdir)
+
+            # Ensure commits
+            result = ensure_repo_has_commits(tmpdir)
+            assert result is True
+
+            # Now should have commits
+            assert repo_has_commits(tmpdir)
+
+    def test_ensure_repo_has_commits_noop_if_commits_exist(self):
+        """Test ensure_repo_has_commits is a no-op if commits already exist."""
+        from ralph2.runner import ensure_repo_has_commits
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize repo with a commit
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "Initial"], cwd=tmpdir, capture_output=True)
+
+            # Get commit count before
+            result = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=tmpdir, capture_output=True, text=True)
+            count_before = int(result.stdout.strip())
+
+            # Ensure commits (should be no-op)
+            ensure_repo_has_commits(tmpdir)
+
+            # Get commit count after
+            result = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=tmpdir, capture_output=True, text=True)
+            count_after = int(result.stdout.strip())
+
+            # Should not have added a commit
+            assert count_before == count_after

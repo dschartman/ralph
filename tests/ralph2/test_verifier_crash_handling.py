@@ -2,7 +2,7 @@
 
 Verifies that:
 1. Verifier errors are retried with exponential backoff
-2. After all retries fail, UNCERTAIN outcome is used (not CONTINUE)
+2. After all retries fail, unverifiable status is used (not silently passing)
 3. Crashed verifier does not silently pass iterations
 """
 
@@ -34,8 +34,8 @@ class TestVerifierCrashHandling:
         return ctx, str(spec_file)
 
     @pytest.mark.asyncio
-    async def test_verifier_crash_results_in_uncertain_not_continue(self, temp_project):
-        """Test that verifier crash results in UNCERTAIN outcome, not CONTINUE.
+    async def test_verifier_crash_results_in_unverifiable_not_passing(self, temp_project):
+        """Test that verifier crash results in unverifiable status, not silently passing.
 
         This is critical - a crashed verifier should not silently pass an iteration.
         """
@@ -51,7 +51,7 @@ class TestVerifierCrashHandling:
             if isinstance(result, Exception):
                 recorded_outcomes.append(("exception", str(result)))
             else:
-                recorded_outcomes.append(("success", result.get("outcome")))
+                recorded_outcomes.append(("success", result.get("spec_satisfied")))
             return original_process(iteration_ctx, result)
 
         runner._process_verifier_result = tracking_process
@@ -64,10 +64,10 @@ class TestVerifierCrashHandling:
         error = Exception("Verifier agent crashed")
         assessment = runner._process_verifier_result(mock_ctx, error)
 
-        # CRITICAL: The outcome should be UNCERTAIN, not CONTINUE
-        assert "UNCERTAIN" in assessment, "Crashed verifier should use UNCERTAIN outcome"
-        assert "CONTINUE" not in assessment.split("Outcome:")[1].split("\n")[0], \
-            "Crashed verifier should NOT use CONTINUE outcome"
+        # CRITICAL: The status should be unverifiable, not "yes" (which would pass)
+        assert "unverifiable" in assessment, "Crashed verifier should use unverifiable status"
+        assert "Spec Satisfied: yes" not in assessment, \
+            "Crashed verifier should NOT silently pass as satisfied"
 
         runner.close()
 
@@ -84,7 +84,7 @@ class TestVerifierCrashHandling:
             if call_count[0] < 3:
                 raise Exception(f"Transient error {call_count[0]}")
             return {
-                "outcome": "CONTINUE",
+                "spec_satisfied": "partially",
                 "assessment": "Success on retry",
                 "messages": []
             }
@@ -101,7 +101,7 @@ class TestVerifierCrashHandling:
 
         # Should have succeeded on the third attempt
         assert isinstance(result, dict), "Should return successful result"
-        assert result["outcome"] == "CONTINUE"
+        assert result["spec_satisfied"] == "partially"
 
         runner.close()
 
@@ -144,7 +144,7 @@ class TestVerifierCrashHandling:
         async def succeed_immediately(**kwargs):
             call_count[0] += 1
             return {
-                "outcome": "DONE",
+                "spec_satisfied": "yes",
                 "assessment": "All criteria satisfied",
                 "messages": []
             }
@@ -160,6 +160,6 @@ class TestVerifierCrashHandling:
 
         # Should return successful result
         assert isinstance(result, dict)
-        assert result["outcome"] == "DONE"
+        assert result["spec_satisfied"] == "yes"
 
         runner.close()

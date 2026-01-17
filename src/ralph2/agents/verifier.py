@@ -12,19 +12,25 @@ from ralph2.agents.streaming import stream_agent_output
 from ralph2.agents.constants import AGENT_MODEL
 
 
-VERIFIER_SYSTEM_PROMPT = """You are the Verifier. Your ONE job: determine if the spec is satisfied.
+VERIFIER_SYSTEM_PROMPT = """You are the Verifier. Your ONE job: assess whether the spec is satisfied.
+
+## Your Role
+
+You are an ASSESSOR, not a decision-maker. You determine the current state of spec satisfaction.
+The Planner decides what to do next based on your assessment.
 
 ## What You Do
 
 1. Find ALL acceptance criteria in the spec (look for [ ] and [x] checkboxes)
 2. For each criterion, verify it against reality
-3. DONE = EVERY criterion is verified satisfied. No exceptions.
+3. Report which are satisfied, not satisfied, or unverifiable
+4. Count and summarize the results
 
 ## Verification Requires Observation
 
 You can only verify what you can observe. If verification requires external
-resources (API credentials, test environments, external services), you cannot
-verify—you can only note that verification is blocked.
+resources (API credentials, test environments, external services), mark that
+criterion as UNVERIFIABLE.
 
 **Capability vs. Behavior:**
 - "System CAN create stories" = capability = verify with unit tests, code inspection
@@ -47,36 +53,29 @@ Prefer automated evidence over manual checks:
 - For behavioral criteria: only trust tests that use real external systems (not mocked)
 - If no automated evidence → verify manually (read code, run commands, inspect output)
 
-## Choosing the Outcome
+## Spec Satisfaction Assessment
 
-**CONTINUE** = There is still implementable work to do
-- Some criteria are not satisfied AND can be implemented
-- Use CONTINUE even if some criteria are unverifiable—as long as there's other work to do
+After checking all criteria, report:
 
-**STUCK** = ALL remaining work requires external blockers
-- Every unsatisfied criterion requires something the executor cannot provide (credentials, human decisions, external access)
-- There is NO implementable work left—only blocked work
-- STUCK means "I literally cannot make progress without external input"
-
-**DONE** = Every criterion is verified satisfied
-- 100% of acceptance criteria are verified (not assumed, not mocked—verified)
-
-**The key distinction:**
-- "Can't verify behavior YET" + "other work remains" = CONTINUE
-- "Can't verify behavior" + "no other work possible" = STUCK
-- If the CLI isn't built, the integration test isn't written, or reports aren't being saved—that's implementable work. Use CONTINUE.
+- **yes** = ALL criteria are verified satisfied (100%)
+- **partially** = SOME criteria satisfied, some not satisfied or unverifiable
+- **no** = NO criteria are satisfied (or critical criteria are not met)
+- **unverifiable** = Cannot determine satisfaction (all criteria require external resources)
 
 ## Rules
 
-- DONE requires 100% of acceptance criteria VERIFIED satisfied
-- Partial completion = CONTINUE (there's work to do)
-- Unverifiable criteria do NOT automatically mean STUCK—only if there's no other implementable work
-- STUCK requires ALL remaining work to be blocked by external dependencies
-- "Good enough" is not DONE
-- "Looks done" is not DONE—only "is done" counts
+- Be objective. Report what IS, not what should be.
+- "Good enough" is not "yes" — only 100% satisfaction is "yes"
+- "Looks done" is not verified — only observed evidence counts
 - The spec is the contract. Verify literally.
 - You do NOT know what was "worked on" — you only see the spec and current state
 - Hold the line. Be stubborn. That's your job.
+
+## What You Do NOT Do
+
+- You do NOT decide CONTINUE/DONE/STUCK (that's the Planner's job)
+- You do NOT recommend next steps (that's the Planner's job)
+- You ONLY assess and report the current state of spec satisfaction
 """
 
 
@@ -159,7 +158,7 @@ async def run_verifier(
                 if message.structured_output:
                     # Validate and convert to Pydantic model
                     result = VerifierResult.model_validate(message.structured_output)
-                    print(f"\033[32m✓ Verifier outcome: {result.outcome}\033[0m")
+                    print(f"\033[32m✓ Verifier assessment: spec_satisfied={result.spec_satisfied} ({result.satisfied_count}/{result.total_count} criteria)\033[0m")
                 elif message.subtype == "error_max_structured_output_retries":
                     print(f"\033[31m✗ Failed to get structured output after retries\033[0m")
 
@@ -167,32 +166,34 @@ async def run_verifier(
 
     # If we didn't get a valid result, create a default
     if result is None:
-        print(f"\033[33mWarning: No structured output received, using default CONTINUE\033[0m")
+        print(f"\033[33mWarning: No structured output received, using default unverifiable\033[0m")
         result = VerifierResult(
-            outcome="CONTINUE",
+            spec_satisfied="unverifiable",
             criteria_status=[],
+            satisfied_count=0,
+            total_count=0,
             gaps=["No structured output received from verifier"]
         )
 
-    # Post verdict as comment on root work item if provided
+    # Post assessment as comment on root work item if provided
     if root_work_item_id:
         # Build a human-readable assessment
-        assessment_lines = [f"Outcome: {result.outcome}"]
+        assessment_lines = [f"Spec Satisfied: {result.spec_satisfied} ({result.satisfied_count}/{result.total_count} criteria)"]
         assessment_lines.append("Criteria Status:")
         for cs in result.criteria_status:
             status_symbol = "✓" if cs.status == "satisfied" else ("✗" if cs.status == "not_satisfied" else "⊘")
             assessment_lines.append(f"- [{status_symbol}] {cs.criterion}: {cs.evidence}")
         if result.gaps:
             assessment_lines.append(f"Gaps: {', '.join(result.gaps)}")
-        if result.blocker:
-            assessment_lines.append(f"Blocker: {result.blocker}")
+        if result.unverifiable_criteria:
+            assessment_lines.append(f"Unverifiable: {', '.join(result.unverifiable_criteria)}")
         if result.efficiency_notes:
             assessment_lines.append(f"Efficiency Notes: {result.efficiency_notes}")
 
         comment_text = "\n".join(assessment_lines)
 
         try:
-            # Use trc comment to post the verdict
+            # Use trc comment to post the assessment
             proc_result = subprocess.run(
                 ["trc", "comment", root_work_item_id, comment_text, "--source", "verifier"],
                 capture_output=True,
@@ -200,32 +201,32 @@ async def run_verifier(
                 check=False
             )
             if proc_result.returncode == 0:
-                print(f"\033[32m✓ Posted verdict to {root_work_item_id}\033[0m")
+                print(f"\033[32m✓ Posted assessment to {root_work_item_id}\033[0m")
             else:
-                print(f"\033[33mWarning: Failed to post verdict comment: {proc_result.stderr}\033[0m")
+                print(f"\033[33mWarning: Failed to post assessment comment: {proc_result.stderr}\033[0m")
         except Exception as e:
-            print(f"\033[33mWarning: Failed to post verdict comment: {e}\033[0m")
+            print(f"\033[33mWarning: Failed to post assessment comment: {e}\033[0m")
 
-    # Build legacy assessment string for backward compatibility
-    legacy_assessment_lines = [f"Outcome: {result.outcome}"]
-    legacy_assessment_lines.append("Criteria Status:")
+    # Build assessment string for runner consumption
+    assessment_lines = [f"Spec Satisfied: {result.spec_satisfied} ({result.satisfied_count}/{result.total_count} criteria)"]
+    assessment_lines.append("Criteria Status:")
     for cs in result.criteria_status:
         status_symbol = "✓" if cs.status == "satisfied" else ("✗" if cs.status == "not_satisfied" else "⊘")
-        legacy_assessment_lines.append(f"- {cs.criterion}: {status_symbol} {cs.status} ({cs.evidence})")
+        assessment_lines.append(f"- {cs.criterion}: {status_symbol} {cs.status} ({cs.evidence})")
     if result.gaps:
-        legacy_assessment_lines.append(f"Gaps: {', '.join(result.gaps)}")
-    if result.blocker:
-        legacy_assessment_lines.append(f"Blocker: {result.blocker}")
+        assessment_lines.append(f"Gaps: {', '.join(result.gaps)}")
+    if result.unverifiable_criteria:
+        assessment_lines.append(f"Unverifiable: {', '.join(result.unverifiable_criteria)}")
     if result.efficiency_notes:
-        legacy_assessment_lines.append(f"Efficiency Notes: {result.efficiency_notes}")
+        assessment_lines.append(f"Efficiency Notes: {result.efficiency_notes}")
 
     return {
         "result": result,
         "full_output": full_text,
         "messages": messages,
-        # Legacy fields for backward compatibility
-        "outcome": result.outcome,
-        "assessment": "\n".join(legacy_assessment_lines),
+        # Fields for runner/planner consumption
+        "spec_satisfied": result.spec_satisfied,
+        "assessment": "\n".join(assessment_lines),
         "efficiency_notes": result.efficiency_notes,
     }
 
@@ -244,7 +245,7 @@ async def main():
 
     result = await run_verifier(spec_content=spec)
     print("\nResult:", result["result"])
-    print("\nOutcome:", result["outcome"])
+    print("\nSpec Satisfied:", result["spec_satisfied"])
     print("\nAssessment:")
     print(result["assessment"])
 

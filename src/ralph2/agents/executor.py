@@ -16,17 +16,24 @@ from ralph2.git import GitBranchManager
 
 EXECUTOR_SYSTEM_PROMPT = """You are the Executor agent in the Ralph2 multi-agent system.
 
-Your job is to do the work assigned to you by the Planner.
+Your job is to do the work assigned to you.
 
 ## Your Responsibilities
 
-1. Read the iteration intent to understand what you should work on
-2. Read task details from Trace (`trc show <id>`) as needed
-3. Do the work using the appropriate approach:
+1. Read your assigned work item from Trace (`trc show <id>`) to understand what you should do
+2. Do ONLY that work—nothing else. Stay focused on your assigned task.
+3. Use the appropriate approach:
    - **Code work**: Write a failing test first, then make it pass
    - **Non-code work** (docs, research, configs): Do directly
 4. Keep Trace updated as you work (comments, subtasks, status)
 5. Commit your work to the branch before finishing
+
+## CRITICAL: Stay Focused on Your Assigned Work Item
+
+You are assigned ONE specific work item. Your job is to complete THAT task and nothing else.
+- Do NOT do work outside your assigned task scope
+- Do NOT try to complete the entire iteration or spec
+- If you discover related work needed, create a subtask or leave a comment—don't do it yourself
 
 ## Using Trace for Work Tracking
 
@@ -307,8 +314,8 @@ Your work will be lost if not committed before the worktree is cleaned up."""
 
 
 async def run_executor(
-    iteration_intent: str,
-    spec_content: str,
+    iteration_intent: Optional[str] = None,
+    spec_content: str = "",
     memory: str = "",
     work_item_id: Optional[str] = None,
     run_id: Optional[str] = None,
@@ -318,10 +325,10 @@ async def run_executor(
     Run the Executor agent.
 
     Args:
-        iteration_intent: What the planner assigned for this iteration
+        iteration_intent: What the planner assigned for this iteration (used for single executor mode)
         spec_content: The specification content (for reference)
         memory: Project memory content
-        work_item_id: Optional work item ID from Trace (for parallel execution)
+        work_item_id: Work item ID from Trace - when provided, executor focuses ONLY on this task
         run_id: Optional run ID (required if work_item_id is provided, for worktree path isolation)
         worktree_path: Optional pre-created worktree path (orchestrator-managed mode).
                        When provided, the executor uses this path directly and does NOT
@@ -330,22 +337,33 @@ async def run_executor(
     Returns:
         dict with keys: 'result' (ExecutorResult), 'full_output' (str), 'messages' (list)
     """
-    # Build the prompt
-    prompt_parts = [
-        "# Iteration Intent",
-        "",
-        iteration_intent,
-        "",
-    ]
+    # Build the prompt based on whether we have a specific work item or general intent
+    prompt_parts = []
 
     if work_item_id:
-        prompt_parts.append(f"**Assigned Work Item:** {work_item_id}")
-        prompt_parts.append("")
-
-    prompt_parts.extend([
-        "---",
-        "",
-    ])
+        # Focused mode: executor works ONLY on this specific Trace work item
+        prompt_parts.extend([
+            "# Your Assigned Work Item",
+            "",
+            f"**Work Item ID:** `{work_item_id}`",
+            "",
+            f"Run `trc show {work_item_id}` to see the full task details, then complete that task.",
+            "",
+            "**Important:** Focus ONLY on this work item. Do not do other work.",
+            "",
+            "---",
+            "",
+        ])
+    elif iteration_intent:
+        # General mode: executor works on iteration intent (single executor, no parallelism)
+        prompt_parts.extend([
+            "# Iteration Intent",
+            "",
+            iteration_intent,
+            "",
+            "---",
+            "",
+        ])
 
     if memory:
         prompt_parts.append("# Project Memory")
@@ -355,20 +373,37 @@ async def run_executor(
         prompt_parts.append("---")
         prompt_parts.append("")
 
-    prompt_parts.extend([
-        "# Spec (for reference)",
-        "",
-        spec_content,
-        "",
-        "---",
-        "",
-        "# Your Task",
-        "",
-        "1. Review the iteration intent to understand what to work on",
-        "2. Use `trc show <id>` to get details on specific tasks if needed",
-        "3. Do the work (read files, make changes, test, etc.)",
-        "4. Leave comments on tasks as you work (when available)",
-    ])
+    if spec_content:
+        prompt_parts.extend([
+            "# Spec (for reference)",
+            "",
+            spec_content,
+            "",
+            "---",
+            "",
+        ])
+
+    prompt_parts.append("# Your Task")
+    prompt_parts.append("")
+
+    if work_item_id:
+        # Focused mode: work on specific Trace item
+        prompt_parts.extend([
+            f"1. Run `trc show {work_item_id}` to read your assigned task",
+            "2. Do ONLY that work (read files, make changes, test, etc.)",
+            "3. Leave comments on the task as you work (`trc comment <id> 'message' --source executor`)",
+            "4. Close the task when complete (`trc close <id>`)",
+            "",
+            "**Stay focused on your assigned work item. Do not do other work.**",
+        ])
+    else:
+        # General mode: work on iteration intent
+        prompt_parts.extend([
+            "1. Review the iteration intent to understand what to work on",
+            "2. Use `trc show <id>` to get details on specific tasks if needed",
+            "3. Do the work (read files, make changes, test, etc.)",
+            "4. Leave comments on tasks as you work",
+        ])
 
     prompt = "\n".join(prompt_parts)
 

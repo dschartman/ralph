@@ -130,25 +130,33 @@ When you decide DONE, you MUST complete the milestone by organizing remaining wo
 After reviewing all feedback, you MUST decide:
 
 **CONTINUE** = There is implementable work remaining
-- Verifier found gaps that can be addressed
+- Verifier reports spec_satisfied is "no" or "partially" with gaps that can be addressed
 - Specialists found issues that can be fixed
 - Tasks remain in the backlog
 - Use CONTINUE even if some work is blocked—as long as there's other work to do
 
-**DONE** = Verifier confirmed spec is satisfied AND no critical work remains
-- Verifier outcome is DONE
+**DONE** = Spec is satisfied AND no critical work remains
+- Verifier reports spec_satisfied: "yes" (all criteria verified satisfied)
 - All critical/high priority tasks are complete
 - Specialists found no critical issues (or they're all resolved)
 - Spec acceptance criteria are fully met
 
 **STUCK** = Cannot make progress without external input
+- Verifier reports spec_satisfied: "unverifiable" AND there's no other implementable work
 - Every remaining task requires external resources (credentials, clarification, access)
 - No implementable work is left
 - You must specify what's blocking progress and what's needed to unblock
 
+**Using Verifier Assessment:**
+The Verifier reports spec_satisfied as: yes, no, partially, or unverifiable
+- "yes" → All criteria satisfied → Consider DONE (if no critical work remains)
+- "partially" → Some criteria satisfied → CONTINUE (address gaps)
+- "no" → Criteria not satisfied → CONTINUE (implement requirements)
+- "unverifiable" → Cannot determine → Check if other work is possible (CONTINUE) or blocked (STUCK)
+
 **The key distinction:**
 - Can work be done with what we have? → CONTINUE
-- Is the spec satisfied and no critical work remains? → DONE
+- Is the spec satisfied (verifier says "yes") and no critical work remains? → DONE
 - Is every remaining task blocked by external dependencies? → STUCK
 """
 

@@ -124,6 +124,57 @@ def branch_exists(branch_name: str, cwd: str) -> bool:
     return result.returncode == 0
 
 
+def repo_has_commits(cwd: str) -> bool:
+    """Check if the git repository has any commits.
+
+    Args:
+        cwd: Working directory (git repository root)
+
+    Returns:
+        True if repo has at least one commit, False otherwise
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False
+    )
+    return result.returncode == 0
+
+
+def ensure_repo_has_commits(cwd: str) -> bool:
+    """Ensure the git repository has at least one commit.
+
+    If the repo has no commits, creates an initial empty commit to enable
+    branching operations. This handles the case where ralph2 is run on a
+    fresh repository.
+
+    Args:
+        cwd: Working directory (git repository root)
+
+    Returns:
+        True if repo now has commits (either already had or was created)
+    """
+    if repo_has_commits(cwd):
+        return True
+
+    # Create initial commit
+    print("   📝 Creating initial commit (fresh repository)...")
+    result = subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "Initial commit (created by Ralph2)"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False
+    )
+    if result.returncode != 0:
+        print(f"   ⚠️  Warning: Could not create initial commit: {result.stderr}")
+        return False
+
+    return True
+
+
 def generate_unique_branch_name(
     slug: str,
     cwd: str,
@@ -916,7 +967,7 @@ class Ralph2Runner:
             print("   🚀 Launching executors...")
             executor_tasks = [
                 run_executor(
-                    iteration_intent=ctx.intent,
+                    # No iteration_intent - executor reads task from Trace via work_item_id
                     spec_content=self.spec_content,
                     memory=ctx.memory,
                     work_item_id=wi["work_item_id"],
@@ -1073,22 +1124,22 @@ class Ralph2Runner:
     def _process_verifier_result(self, ctx: IterationContext, result) -> str:
         """Process verifier result and save output.
 
-        IMPORTANT: When the verifier crashes, we use UNCERTAIN outcome instead of CONTINUE.
+        IMPORTANT: When the verifier crashes, we use unverifiable status.
         This prevents a crashed verifier from silently passing an iteration that may have issues.
-        The UNCERTAIN outcome signals that human attention may be needed.
+        The Planner will decide what to do based on this assessment.
         """
         if isinstance(result, Exception):
             print(f"   ❌ Verifier error: {result}")
-            print(f"   ⚠️  Using UNCERTAIN outcome - crashed verifier should not silently pass")
+            print(f"   ⚠️  Using unverifiable status - crashed verifier should not silently pass")
             result = {
-                "outcome": "UNCERTAIN",
-                "assessment": f"Outcome: UNCERTAIN\nReasoning: Verifier agent crashed with error: {result}\nGaps: Unable to verify - agent error. Manual verification may be needed.",
+                "spec_satisfied": "unverifiable",
+                "assessment": f"Spec Satisfied: unverifiable (0/0 criteria)\nReasoning: Verifier agent crashed with error: {result}\nGaps: Unable to verify - agent error. Manual verification may be needed.",
                 "full_output": str(result),
                 "messages": []
             }
 
-        outcome, assessment = result["outcome"], result["assessment"]
-        print(f"   Verifier Outcome: {outcome}")
+        spec_satisfied, assessment = result["spec_satisfied"], result["assessment"]
+        print(f"   Verifier Assessment: spec_satisfied={spec_satisfied}")
         print(f"   Assessment: {assessment[:200]}...\n" if len(assessment) > 200 else f"   Assessment: {assessment}\n")
 
         verifier_output_path = self._save_agent_messages(ctx.iteration_id, "verifier", result["messages"])
@@ -1276,6 +1327,11 @@ class Ralph2Runner:
             The milestone branch name, or None if creation failed
         """
         cwd = str(self.project_context.project_root)
+
+        # Ensure repo has at least one commit (fresh repo handling)
+        if not ensure_repo_has_commits(cwd):
+            print("   ⚠️  Warning: Could not ensure repo has commits")
+            return None
 
         # Generate branch name from spec title if not explicitly provided
         if self._branch:
