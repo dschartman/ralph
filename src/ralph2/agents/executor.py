@@ -113,6 +113,30 @@ When you complete infrastructure but cannot verify behavior:
 - Report Status: **Blocked** (not Completed)
 - Document exactly what resources are needed for behavioral verification
 
+## Efficiency Notes
+
+Before finishing, reflect on what you learned that would help future iterations:
+
+**Ask yourself:** "What do I wish I'd known when I started?"
+
+Good efficiency notes are:
+- **Specific**: "Run tests with `uv run pytest tests/ -v`" not "tests exist"
+- **Actionable**: Tell someone what to DO, not what you discovered
+- **Project-specific**: Not general knowledge, but THIS project's patterns
+
+Examples of GOOD efficiency notes:
+- "Project structure: src/mr_reviewer/{cli,config,models,gitlab_client,agent}.py"
+- "Use `uv run mr-reviewer --help` to test CLI changes"
+- "GitLab client is in gitlab_client.py, uses python-gitlab library"
+- "Settings loaded via pydantic-settings from .env file"
+
+Examples of BAD efficiency notes (too vague):
+- "The project has good structure"
+- "Tests are helpful"
+- "Read the code first"
+
+Fill in the `efficiency_notes` field in your output with 2-3 concrete insights.
+
 ## Before You Finish
 
 Before reporting your final status, verify:
@@ -313,6 +337,92 @@ Your work will be lost if not committed before the worktree is cleaned up."""
         return result
 
 
+async def _gather_efficiency_notes(
+    result: ExecutorResult,
+    options: ClaudeAgentOptions,
+) -> ExecutorResult:
+    """Gather efficiency notes from the agent after work is complete.
+
+    This runs as a follow-up in the same session, while the agent still has
+    full context of what it just did. This produces better learnings than
+    asking upfront in the system prompt.
+
+    Args:
+        result: The executor result (may already have efficiency_notes)
+        options: Agent options for follow-up prompts
+
+    Returns:
+        Updated ExecutorResult with enriched efficiency_notes
+    """
+    # Skip if agent already provided substantial efficiency notes
+    if result.efficiency_notes and len(result.efficiency_notes) > 100:
+        return result
+
+    print(f"\033[36m→ Gathering efficiency notes...\033[0m")
+
+    reflection_prompt = """Now that you've completed the work, I have a few quick reflection questions to help future iterations:
+
+1. **What would have saved you time?**
+   Think about what you had to discover or figure out. What do you wish you'd known when you started?
+
+2. **What project patterns did you find?**
+   Any specific file locations, import patterns, test commands, or conventions that were useful?
+
+3. **Any gotchas or surprises?**
+   Anything that almost tripped you up or was different from what you expected?
+
+Please respond with 2-4 bullet points of concrete, actionable insights. Be specific - mention file paths, commands, or patterns by name.
+
+Example good responses:
+- "Project uses src/app/{routes,models,services}.py structure - start there for any feature work"
+- "Run tests with `uv run pytest -xvs` - the -x flag stops on first failure which speeds up debugging"
+- "Config is in .env but loaded via pydantic-settings in config.py - check Settings class for required vars"
+"""
+
+    try:
+        # Create options without structured output for free-form response
+        reflection_options = ClaudeAgentOptions(
+            model=options.model,
+            allowed_tools=[],  # No tools needed for reflection
+            permission_mode=options.permission_mode,
+            system_prompt="You are reflecting on work you just completed. Be concise and specific.",
+            cwd=options.cwd,
+        )
+
+        full_output = []
+        async with ClaudeSDKClient(options=reflection_options) as client:
+            await client.query(reflection_prompt)
+
+            async for message in client.receive_response():
+                stream_agent_output(message, full_output)
+
+        reflection_text = "\n".join(full_output).strip()
+
+        if reflection_text:
+            # Combine with any existing efficiency notes
+            if result.efficiency_notes:
+                combined_notes = f"{result.efficiency_notes}\n\n{reflection_text}"
+            else:
+                combined_notes = reflection_text
+
+            print(f"\033[32m✓ Gathered efficiency notes\033[0m")
+
+            return ExecutorResult(
+                status=result.status,
+                what_was_done=result.what_was_done,
+                blockers=result.blockers,
+                notes=result.notes,
+                efficiency_notes=combined_notes,
+                work_committed=result.work_committed,
+                traces_updated=result.traces_updated
+            )
+
+    except Exception as e:
+        print(f"\033[33m⚠ Could not gather efficiency notes: {e}\033[0m")
+
+    return result
+
+
 async def run_executor(
     iteration_intent: Optional[str] = None,
     spec_content: str = "",
@@ -499,6 +609,9 @@ async def _run_executor_with_orchestrator_worktree(
     # This is critical - uncommitted changes will be lost when worktree is cleaned up
     result = await _verify_and_remediate_commit(result, options_with_cwd, worktree_path)
 
+    # Gather efficiency notes while context is fresh
+    result = await _gather_efficiency_notes(result, options_with_cwd)
+
     # NOTE: We do NOT merge or cleanup here - the orchestrator handles that
     # This allows:
     # 1. All executors to complete before any merge
@@ -602,6 +715,9 @@ async def _run_executor_with_git_isolation(
             result = await _verify_and_remediate_commit(
                 result, options_with_cwd, git_manager.worktree_path
             )
+
+            # Gather efficiency notes while context is fresh
+            result = await _gather_efficiency_notes(result, options_with_cwd)
 
             # Handle merge/cleanup based on status
             if result.status == "Completed":

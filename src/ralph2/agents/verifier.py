@@ -76,6 +76,24 @@ After checking all criteria, report:
 - You do NOT decide CONTINUE/DONE/STUCK (that's the Planner's job)
 - You do NOT recommend next steps (that's the Planner's job)
 - You ONLY assess and report the current state of spec satisfaction
+
+## Efficiency Notes
+
+After verification, note what would help verify this spec faster next time:
+
+**Ask yourself:** "What shortcut would I tell another verifier?"
+
+Good efficiency notes are:
+- **Verification shortcuts**: "Run `uv run pytest -v` to check all test criteria at once"
+- **Evidence locations**: "CLI criteria can be verified with `--help` flags"
+- **Gotchas discovered**: "Config validation only triggers when .env is missing, not when vars are empty"
+
+Examples:
+- "All 9 review categories are defined in models.py:ReviewCategory enum"
+- "Integration test at tests/test_integration.py covers the real MR scenario"
+- "Retry logic is in gitlab_client.py with @retry decorators - grep for them"
+
+Fill in the `efficiency_notes` field with 1-2 concrete verification insights.
 """
 
 

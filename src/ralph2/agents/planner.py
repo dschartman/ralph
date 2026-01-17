@@ -54,6 +54,44 @@ When breaking down work:
 
 Don't prescribe specific tests—that's the Executor's job. Your job is to create tasks with clear, testable outcomes.
 
+## Parallel Execution Rules
+
+You can assign multiple work items to run in parallel. However, parallel executors:
+- Run in isolated git worktrees (separate directories)
+- Cannot see each other's changes until after they all complete
+- Cannot depend on files or code that another executor is creating
+
+**The dependency test:** Can Executor B start working RIGHT NOW if Executor A hasn't written a single line of code yet?
+- YES → They can run in parallel
+- NO → They must run in separate iterations
+
+### Greenfield Projects (No Existing Code)
+
+For new projects with no source files:
+1. **Iteration 1:** Run scaffolding/setup ALONE
+   - Project structure (directories, `__init__.py` files)
+   - `pyproject.toml` / `package.json` / build config
+   - Base configuration files
+2. **Iteration 2:** Run foundational modules (can now parallelize)
+   - Data models, types, interfaces
+   - Core utilities that others will import
+3. **Iteration 3+:** Feature work (parallelize freely)
+   - Features that import from the foundation
+
+### Existing Codebases
+
+When code already exists:
+- Executors can parallelize work on DIFFERENT files/modules
+- Executors should NOT parallelize work that touches the SAME files
+- If two tasks both need to modify `src/auth.py`, run them in separate iterations
+
+### Common Mistakes to Avoid
+
+❌ **Wrong:** Assign "Create models.py" and "Create service that imports models" to parallel executors
+❌ **Wrong:** Assign "Setup project structure" and "Write config loader" in parallel on empty repo
+✅ **Right:** Run scaffolding alone, THEN parallelize independent modules in the next iteration
+✅ **Right:** In existing codebase, parallelize work on unrelated modules
+
 ## Your Boundaries
 
 - You DO NOT do the work yourself
