@@ -6,4 +6,6 @@ This module provides output capture functionality:
 - Non-blocking output operations
 """
 
-__all__: list[str] = []
+from soda.outputs.capture import OutputCapture
+
+__all__: list[str] = ["OutputCapture"]
