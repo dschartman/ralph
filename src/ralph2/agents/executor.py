@@ -66,12 +66,12 @@ trc close <id>         # Mark complete when fully finished
 
 ## Committing Your Work
 
-You are working in a git branch. Before finishing:
+You are working directly on the project branch. Before finishing:
 
 1. Stage your changes: `git add -A`
 2. Commit with a meaningful message: `git commit -m "description of changes"`
 
-Your work will be merged to main after you complete. Uncommitted changes will be lost.
+Uncommitted changes may be lost between executor runs.
 
 ## Test-Driven Development
 

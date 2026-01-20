@@ -559,12 +559,12 @@ class TestRunnerParallelExecutors:
     """Test the refactored _run_parallel_executors method."""
 
     @pytest.mark.asyncio
-    async def test_parallel_executors_lifecycle(self):
-        """Test _run_parallel_executors follows correct lifecycle."""
+    async def test_serial_executors_runs_sequentially(self):
+        """Test _run_serial_executors runs executors one at a time."""
         from ralph2.runner import Ralph2Runner, IterationContext
         from pathlib import Path
 
-        lifecycle_events = []
+        execution_order = []
 
         mock_result = {
             "status": "Completed",
@@ -575,22 +575,8 @@ class TestRunnerParallelExecutors:
         }
 
         async def mock_run_executor(**kwargs):
-            lifecycle_events.append(("executor", kwargs.get("work_item_id")))
+            execution_order.append(kwargs.get("work_item_id"))
             return mock_result
-
-        def mock_create_worktrees(work_items, run_id):
-            lifecycle_events.append(("create_worktrees", len(work_items)))
-            return [
-                (wi, f"/wt/{wi['work_item_id']}", f"ralph2/{wi['work_item_id']}")
-                for wi in work_items
-            ]
-
-        async def mock_merge_serial(completed):
-            lifecycle_events.append(("merge", len(completed)))
-            return []
-
-        def mock_cleanup(worktree_info):
-            lifecycle_events.append(("cleanup", len(worktree_info)))
 
         # Create runner with mocked project_context
         runner = Ralph2Runner.__new__(Ralph2Runner)
@@ -600,10 +586,6 @@ class TestRunnerParallelExecutors:
         runner.spec_content = "test spec"
         runner.db = MagicMock()
         runner.output_dir = runner.project_context.outputs_dir
-
-        runner._create_worktrees = mock_create_worktrees
-        runner._merge_worktrees_serial = mock_merge_serial
-        runner._cleanup_all_worktrees = mock_cleanup
         runner._save_agent_messages = MagicMock(return_value="/mock/output.jsonl")
 
         iter_ctx = IterationContext(
@@ -616,39 +598,39 @@ class TestRunnerParallelExecutors:
                 "work_items": [
                     {"work_item_id": "ralph-task1"},
                     {"work_item_id": "ralph-task2"},
+                    {"work_item_id": "ralph-task3"},
                 ]
             }
         )
 
         with patch('ralph2.runner.run_executor', side_effect=mock_run_executor):
-            await runner._run_parallel_executors(iter_ctx)
+            await runner._run_serial_executors(iter_ctx)
 
-        # Verify lifecycle order
-        assert lifecycle_events[0][0] == "create_worktrees", "Should create worktrees first"
-        assert lifecycle_events[1][0] == "executor"
-        assert lifecycle_events[2][0] == "executor"
-        assert lifecycle_events[3][0] == "merge", "Should merge after executors"
-        assert lifecycle_events[4][0] == "cleanup", "Should cleanup last"
+        # Verify all executors ran in order
+        assert execution_order == ["ralph-task1", "ralph-task2", "ralph-task3"]
 
     @pytest.mark.asyncio
-    async def test_parallel_executors_cleanup_on_exception(self):
-        """Test cleanup happens even if executors fail."""
+    async def test_serial_executors_continues_after_error(self):
+        """Test serial executors continue running after one fails."""
         from ralph2.runner import Ralph2Runner, IterationContext
         from pathlib import Path
 
-        cleanup_called = [False]
+        execution_order = []
+
+        mock_result = {
+            "status": "Completed",
+            "summary": "Work done",
+            "full_output": "",
+            "messages": [],
+            "result": MagicMock(status="Completed"),
+        }
 
         async def mock_run_executor(**kwargs):
-            raise Exception("Executor crashed")
-
-        def mock_create_worktrees(work_items, run_id):
-            return [
-                (wi, f"/wt/{wi['work_item_id']}", f"ralph2/{wi['work_item_id']}")
-                for wi in work_items
-            ]
-
-        def mock_cleanup(worktree_info):
-            cleanup_called[0] = True
+            work_item_id = kwargs.get("work_item_id")
+            execution_order.append(work_item_id)
+            if work_item_id == "ralph-task2":
+                raise Exception("Executor crashed")
+            return mock_result
 
         # Create runner with mocked project_context
         runner = Ralph2Runner.__new__(Ralph2Runner)
@@ -658,10 +640,6 @@ class TestRunnerParallelExecutors:
         runner.spec_content = "test spec"
         runner.db = MagicMock()
         runner.output_dir = runner.project_context.outputs_dir
-
-        runner._create_worktrees = mock_create_worktrees
-        runner._merge_worktrees_serial = AsyncMock(return_value=[])
-        runner._cleanup_all_worktrees = mock_cleanup
         runner._save_agent_messages = MagicMock(return_value="/mock/output.jsonl")
 
         iter_ctx = IterationContext(
@@ -673,20 +651,22 @@ class TestRunnerParallelExecutors:
             iteration_plan={
                 "work_items": [
                     {"work_item_id": "ralph-task1"},
+                    {"work_item_id": "ralph-task2"},
+                    {"work_item_id": "ralph-task3"},
                 ]
             }
         )
 
         with patch('ralph2.runner.run_executor', side_effect=mock_run_executor):
-            # Should not raise - exceptions are caught
-            await runner._run_parallel_executors(iter_ctx)
+            # Should not raise - errors are caught per executor
+            await runner._run_serial_executors(iter_ctx)
 
-        # Cleanup should have been called even though executor failed
-        assert cleanup_called[0] is True, "Cleanup should be called even on executor failure"
+        # All executors should have been attempted
+        assert execution_order == ["ralph-task1", "ralph-task2", "ralph-task3"]
 
     @pytest.mark.asyncio
-    async def test_parallel_executors_passes_worktree_path(self):
-        """Test executors receive worktree_path parameter."""
+    async def test_serial_executors_no_worktree_path(self):
+        """Test serial executors do NOT receive worktree_path parameter."""
         from ralph2.runner import Ralph2Runner, IterationContext
         from pathlib import Path
 
@@ -704,12 +684,6 @@ class TestRunnerParallelExecutors:
             executor_calls.append(kwargs)
             return mock_result
 
-        def mock_create_worktrees(work_items, run_id):
-            return [
-                (wi, f"/wt/{wi['work_item_id']}", f"ralph2/{wi['work_item_id']}")
-                for wi in work_items
-            ]
-
         # Create runner with mocked project_context
         runner = Ralph2Runner.__new__(Ralph2Runner)
         runner.project_context = MagicMock()
@@ -718,10 +692,6 @@ class TestRunnerParallelExecutors:
         runner.spec_content = "test spec"
         runner.db = MagicMock()
         runner.output_dir = runner.project_context.outputs_dir
-
-        runner._create_worktrees = mock_create_worktrees
-        runner._merge_worktrees_serial = AsyncMock(return_value=[])
-        runner._cleanup_all_worktrees = MagicMock()
         runner._save_agent_messages = MagicMock(return_value="/mock/output.jsonl")
 
         iter_ctx = IterationContext(
@@ -738,9 +708,8 @@ class TestRunnerParallelExecutors:
         )
 
         with patch('ralph2.runner.run_executor', side_effect=mock_run_executor):
-            await runner._run_parallel_executors(iter_ctx)
+            await runner._run_serial_executors(iter_ctx)
 
-        # Verify worktree_path was passed
+        # Verify worktree_path was NOT passed (serial execution doesn't use worktrees)
         assert len(executor_calls) == 1
-        assert "worktree_path" in executor_calls[0]
-        assert executor_calls[0]["worktree_path"] == "/wt/ralph-task1"
+        assert executor_calls[0].get("worktree_path") is None
