@@ -951,3 +951,242 @@ class TestSenseFunction:
         assert claims.code_state.error is not None
         # But work state was collected
         assert len(claims.work_state.open_tasks) == 1
+
+    def test_sense_collects_files_changed(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects files_changed via git diff --name-only."""
+        # Mock git diff --name-only output
+        mock_git_client._run_git.side_effect = lambda args, check=True: (
+            MagicMock(stdout="", returncode=0) if args[:1] == ["status"]
+            else MagicMock(
+                stdout="src/main.py\ntests/test_main.py\nREADME.md",
+                returncode=0,
+            ) if "diff" in args and "--name-only" in args
+            else MagicMock(stdout="", returncode=0)  # shortstat and other calls
+        )
+        mock_git_client.get_commits_since.return_value = []
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.code_state.files_changed == ["src/main.py", "tests/test_main.py", "README.md"]
+
+    def test_sense_collects_diff_summary(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects diff summary (lines_added/removed) from git diff --shortstat."""
+        # Mock git diff --shortstat output
+        mock_git_client._run_git.side_effect = lambda args, check=True: (
+            MagicMock(stdout="", returncode=0) if args[:1] == ["status"]
+            else MagicMock(stdout="", returncode=0) if "diff" in args and "--name-only" in args
+            else MagicMock(
+                stdout=" 5 files changed, 150 insertions(+), 42 deletions(-)",
+                returncode=0,
+            ) if "diff" in args and "--shortstat" in args
+            else MagicMock(stdout="", returncode=0)
+        )
+        mock_git_client.get_commits_since.return_value = []
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.code_state.diff_summary is not None
+        assert claims.code_state.diff_summary.lines_added == 150
+        assert claims.code_state.diff_summary.lines_removed == 42
+
+    def test_sense_collects_agent_summaries(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects executor/verifier summaries from db.get_agent_outputs()."""
+        from soda.state.models import Iteration, IterationOutcome, AgentOutput, AgentType
+
+        # Mock iteration history with one iteration
+        mock_db.get_iterations.return_value = [
+            Iteration(
+                id=1,
+                run_id="run-123",
+                number=1,
+                intent="Implement feature",
+                outcome=IterationOutcome.CONTINUE,
+                started_at=datetime.now(),
+            ),
+        ]
+
+        # Mock agent outputs from that iteration
+        mock_db.get_agent_outputs.return_value = [
+            AgentOutput(
+                id=1,
+                iteration_id=1,
+                agent_type=AgentType.EXECUTOR,
+                raw_output_path="/path/to/executor_output.jsonl",
+                summary="Completed implementing feature X",
+            ),
+            AgentOutput(
+                id=2,
+                iteration_id=1,
+                agent_type=AgentType.VERIFIER,
+                raw_output_path="/path/to/verifier_output.jsonl",
+                summary="All tests passing, spec satisfied",
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.project_state.agent_summaries) == 2
+        assert claims.project_state.agent_summaries[0].agent_type == "executor"
+        assert claims.project_state.agent_summaries[0].summary == "Completed implementing feature X"
+        assert claims.project_state.agent_summaries[1].agent_type == "verifier"
+        assert claims.project_state.agent_summaries[1].summary == "All tests passing, spec satisfied"
+
+    def test_sense_flags_spec_modified(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() sets spec_modified=True when content contains 'spec' + update/change/modify/add."""
+        from soda.state.models import HumanInput, InputType
+
+        # Test case 1: "spec" + "update" -> spec_modified=True
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(
+                id=1,
+                run_id="run-123",
+                input_type=InputType.COMMENT,
+                content="Please update the spec to include error handling",
+                created_at=datetime.now(),
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.spec_modified is True
+
+    def test_sense_spec_modified_with_change(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() sets spec_modified=True when content contains 'spec' + 'change'."""
+        from soda.state.models import HumanInput, InputType
+
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(
+                id=1,
+                run_id="run-123",
+                input_type=InputType.COMMENT,
+                content="Change the spec requirements",
+                created_at=datetime.now(),
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.spec_modified is True
+
+    def test_sense_spec_modified_with_modify(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() sets spec_modified=True when content contains 'spec' + 'modify'."""
+        from soda.state.models import HumanInput, InputType
+
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(
+                id=1,
+                run_id="run-123",
+                input_type=InputType.COMMENT,
+                content="Modify the spec to be more specific",
+                created_at=datetime.now(),
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.spec_modified is True
+
+    def test_sense_spec_modified_with_add(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() sets spec_modified=True when content contains 'spec' + 'add'."""
+        from soda.state.models import HumanInput, InputType
+
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(
+                id=1,
+                run_id="run-123",
+                input_type=InputType.COMMENT,
+                content="Add to the spec: new authentication requirement",
+                created_at=datetime.now(),
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.spec_modified is True
+
+    def test_sense_spec_not_modified_without_keywords(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() sets spec_modified=False when content doesn't match pattern."""
+        from soda.state.models import HumanInput, InputType
+
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(
+                id=1,
+                run_id="run-123",
+                input_type=InputType.COMMENT,
+                content="Please focus on performance",
+                created_at=datetime.now(),
+            ),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.spec_modified is False
