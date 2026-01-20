@@ -1,9 +1,15 @@
-"""Tests for DECIDE data structures (Decision)."""
+"""Tests for DECIDE data structures and routing logic."""
 
 import pytest
 from pydantic import ValidationError
 
-from soda.decide import Decision, DecisionOutcome
+from soda.decide import (
+    Decision,
+    DecisionOutcome,
+    OrientOutput,
+    SpecSatisfied,
+    decide,
+)
 
 
 class TestDecisionOutcome:
@@ -131,3 +137,188 @@ class TestDecision:
         assert decision.outcome == DecisionOutcome.STUCK
         assert decision.reason == "Blocked"
         assert decision.summary == "Progress so far"
+
+
+class TestSpecSatisfied:
+    """Tests for SpecSatisfied enum."""
+
+    def test_true_value(self):
+        """TRUE value exists."""
+        assert SpecSatisfied.TRUE.value == "true"
+
+    def test_false_value(self):
+        """FALSE value exists."""
+        assert SpecSatisfied.FALSE.value == "false"
+
+    def test_unverifiable_value(self):
+        """UNVERIFIABLE value exists."""
+        assert SpecSatisfied.UNVERIFIABLE.value == "unverifiable"
+
+
+class TestOrientOutput:
+    """Tests for OrientOutput model (minimal for DECIDE)."""
+
+    def test_orient_output_spec_satisfied_true(self):
+        """OrientOutput with spec_satisfied=true."""
+        output = OrientOutput(
+            spec_satisfied=SpecSatisfied.TRUE,
+            actionable_work_exists=False,
+            summary="All criteria met",
+        )
+        assert output.spec_satisfied == SpecSatisfied.TRUE
+        assert output.actionable_work_exists is False
+
+    def test_orient_output_spec_satisfied_false(self):
+        """OrientOutput with spec_satisfied=false."""
+        output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=True,
+            gaps=["Missing tests"],
+        )
+        assert output.spec_satisfied == SpecSatisfied.FALSE
+        assert output.actionable_work_exists is True
+        assert "Missing tests" in output.gaps
+
+    def test_orient_output_spec_unverifiable(self):
+        """OrientOutput with spec_satisfied=unverifiable."""
+        output = OrientOutput(
+            spec_satisfied=SpecSatisfied.UNVERIFIABLE,
+            actionable_work_exists=False,
+            gaps=["Requires external API"],
+        )
+        assert output.spec_satisfied == SpecSatisfied.UNVERIFIABLE
+        assert output.actionable_work_exists is False
+
+    def test_orient_output_from_string(self):
+        """OrientOutput can be created with string spec_satisfied."""
+        output = OrientOutput(
+            spec_satisfied="true",
+            actionable_work_exists=False,
+            summary="Done",
+        )
+        assert output.spec_satisfied == SpecSatisfied.TRUE
+
+    def test_orient_output_json_serializable(self):
+        """OrientOutput can be serialized to JSON."""
+        output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=True,
+            gaps=["Gap 1"],
+        )
+        data = output.model_dump(mode="json")
+        assert data["spec_satisfied"] == "false"
+        assert data["actionable_work_exists"] is True
+
+
+class TestDecideFunction:
+    """Tests for decide() routing logic.
+
+    Routing rules:
+    - spec_satisfied=true → DONE
+    - spec_satisfied=false AND actionable_work_exists=true → CONTINUE
+    - spec_satisfied=false AND actionable_work_exists=false → STUCK
+    - spec_satisfied=unverifiable AND actionable_work_exists=false → STUCK
+    - spec_satisfied=unverifiable AND actionable_work_exists=true → CONTINUE
+    """
+
+    def test_decide_spec_satisfied_true_returns_done(self):
+        """WHEN spec_satisfied=true, THEN DECIDE returns DONE."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.TRUE,
+            actionable_work_exists=False,
+            summary="All acceptance criteria verified",
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.DONE
+        assert decision.summary == "All acceptance criteria verified"
+
+    def test_decide_spec_satisfied_true_ignores_actionable_work(self):
+        """DONE takes precedence even if actionable_work_exists=true."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.TRUE,
+            actionable_work_exists=True,
+            summary="Complete despite remaining work",
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.DONE
+
+    def test_decide_spec_false_actionable_true_returns_continue(self):
+        """WHEN spec_satisfied=false AND actionable_work_exists=true, THEN CONTINUE."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=True,
+            gaps=["Missing implementation"],
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.CONTINUE
+
+    def test_decide_spec_false_actionable_false_returns_stuck(self):
+        """WHEN spec_satisfied=false AND actionable_work_exists=false, THEN STUCK."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=False,
+            gaps=["All tasks blocked"],
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.STUCK
+        assert decision.reason is not None
+        assert "blocked" in decision.reason.lower() or "All tasks blocked" in decision.reason
+
+    def test_decide_spec_unverifiable_actionable_false_returns_stuck(self):
+        """WHEN spec_satisfied=unverifiable AND actionable_work_exists=false, THEN STUCK."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.UNVERIFIABLE,
+            actionable_work_exists=False,
+            gaps=["Requires external API key"],
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.STUCK
+        assert decision.reason is not None
+
+    def test_decide_spec_unverifiable_actionable_true_returns_continue(self):
+        """WHEN spec_satisfied=unverifiable AND actionable_work_exists=true, THEN CONTINUE."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.UNVERIFIABLE,
+            actionable_work_exists=True,
+            gaps=["Requires external verification"],
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.CONTINUE
+
+    def test_decide_stuck_includes_reason_from_gaps(self):
+        """WHEN STUCK, reason comes from ORIENT gaps."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=False,
+            gaps=["Gap A: Missing dependency", "Gap B: Blocked by external"],
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.STUCK
+        # Reason should include gap information
+        assert "Gap A" in decision.reason or "Missing dependency" in decision.reason
+
+    def test_decide_done_includes_summary(self):
+        """WHEN DONE, summary comes from ORIENT output."""
+        summary_text = "All 5 acceptance criteria verified with passing tests"
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.TRUE,
+            actionable_work_exists=False,
+            summary=summary_text,
+        )
+        decision = decide(orient_output)
+        assert decision.outcome == DecisionOutcome.DONE
+        assert decision.summary == summary_text
+
+    def test_decide_is_deterministic(self):
+        """Same input always produces same output (deterministic)."""
+        orient_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=True,
+            gaps=["Test gap"],
+        )
+        decision1 = decide(orient_output)
+        decision2 = decide(orient_output)
+        decision3 = decide(orient_output)
+        assert decision1.outcome == decision2.outcome == decision3.outcome
+        assert decision1.reason == decision2.reason == decision3.reason
+        assert decision1.summary == decision2.summary == decision3.summary
