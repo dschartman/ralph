@@ -40,3 +40,57 @@
 {"timestamp": "2026-01-20T18:04:57.680711+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
 {"timestamp": "2026-01-20T18:04:57.682107+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
 {"timestamp": "2026-01-20T18:04:57.682507+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T18:35:28.434853+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.436195+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:35:28.437019+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.437798+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.438553+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.439286+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.697222+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.950578+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:28.954704+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:32.947622+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:32.949758+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:35:32.950942+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:32.952042+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:32.953102+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:32.954167+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:33.260562+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:33.607960+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:33.611634+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:35:33.651154+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:35:33.652403+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:35:33.652802+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T18:39:14.979244+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:14.981654+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:39:14.982914+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:14.984060+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:14.985137+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:14.986196+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:15.311089+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:15.683729+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:15.687280+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.684297+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.686834+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:39:19.688297+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.689497+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.690586+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.691648+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:19.909235+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:20.333316+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:20.336827+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:39:20.374178+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:39:20.375445+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:39:20.375869+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T18:45:44.472250+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:44.474910+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:45:44.476218+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:44.477389+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:44.478473+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:44.479538+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:44.821656+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:45.194028+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:45.196361+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:45:45.237054+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:45:45.238440+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:45:45.238851+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
