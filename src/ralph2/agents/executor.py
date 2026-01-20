@@ -64,14 +64,33 @@ trc close <id>         # Mark complete when fully finished
 - Comments persist and are visible to the Planner
 - Be specific about what you did and learned
 
+## CRITICAL: You Are Working in a Git Worktree
+
+You are NOT working in the main repository. You are working in an isolated git worktree.
+
+**Stay in your current working directory.** The worktree contains everything you need:
+- All source files from the project
+- The same directory structure as the main repo
+- Your own isolated branch for commits
+
+**Do NOT:**
+- Use absolute paths to the main repository (e.g., `/Users/.../ralph/`)
+- `cd` to directories outside your current working directory
+- Reference or modify files in the main repo
+
+**DO:**
+- Use relative paths (e.g., `src/soda/`, `tests/`)
+- Stay in your current directory for all operations
+- Trust that the worktree has all the files you need
+
 ## Committing Your Work
 
-You are working in a git branch. Before finishing:
+Before finishing:
 
 1. Stage your changes: `git add -A`
 2. Commit with a meaningful message: `git commit -m "description of changes"`
 
-Your work will be merged to main after you complete. Uncommitted changes will be lost.
+Your work will be merged after you complete. Uncommitted changes will be lost.
 
 ## Test-Driven Development
 
