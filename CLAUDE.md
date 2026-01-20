@@ -30,7 +30,11 @@ ralph/                      # Repo name
 ├── pyproject.toml          # UV-managed dependencies
 ├── docs/                   # Theory and architecture docs
 │   ├── understanding-ralph.md
-│   └── agent-orchestration-model.md
+│   ├── agent-orchestration-model.md
+│   ├── data-analysis-methodology.md
+│   └── soda-loop.md
+├── scripts/
+│   └── analyze-ralph2-data.sh  # Data analysis utility
 ├── src/
 │   ├── ralph/              # Original implementation (frozen)
 │   └── ralph2/             # New implementation (active development)
@@ -79,6 +83,59 @@ trc create "title" --description "context"
 trc close <id>         # Mark complete
 ```
 
+## Using Trace for Work Tracking
+
+This project uses [Trace](https://github.com/dschartman/trace) for persistent
+work tracking across AI sessions.
+
+**When to use trace vs TodoWrite:**
+
+Use trace instead of TodoWrite for any non-trivial work. If it involves multiple
+files, could span sessions, or needs to persist - use trace.
+
+- **TodoWrite**: Single-session trivial tasks only
+- **Trace**: Everything else (features, bugs, planning, multi-step work)
+- **When in doubt**: Use trace
+
+**Why this matters:** Trace persists across sessions and commits to git. TodoWrite
+is ephemeral. For a tool designed around persistent work tracking, using TodoWrite
+defeats the purpose.
+
+**Setup (required once per project):**
+
+```bash
+trc init  # Run this first in your git repo
+```
+
+If you forget, you'll see: "Error: Project not initialized. Run 'trc init' first"
+
+**Core workflow:**
+
+```bash
+# Create work
+trc create "title" --description "context"
+trc create "subtask" --description "details" --parent <id>
+
+# Discover work
+trc ready              # What's unblocked and ready to work on
+trc list               # Current backlog (excludes closed)
+trc show <id>          # Full details with dependencies
+
+# Complete work
+trc close <id> [...]   # Close one or more issues
+```
+
+**Essential details:**
+
+- `--description` is required (preserves context across sessions for AI agents)
+  - Use `--description ""` to explicitly skip if truly not needed
+- Structure is fluid: Break down or reorganize as understanding evolves
+- Use `--parent <id>` to create hierarchical breakdowns
+- Cross-project: Add `--project <name>` to work across repositories
+- Use `trc <command> --help` for full options
+
+For more details: https://github.com/dschartman/trace
+
 ## State Location
 
 **Ralph2:** State stored at `~/.ralph2/projects/<project-id>/`:
@@ -112,6 +169,31 @@ When working on Ralph2:
 2. Run tests with `uv run pytest tests/ -v`
 3. Test changes by running `uv run ralph2 run` on a test Ralph2file
 4. All agent prompts are in `src/ralph2/agents/*.py`
+
+## Analyzing Run Data
+
+Ralph2 collects data on every run: iterations, agent outputs, verifier progression, and outcomes. Use this for research and improvement.
+
+**Quick commands:**
+```bash
+# Overview of all data
+./scripts/analyze-ralph2-data.sh overview
+
+# Find runs with most data
+./scripts/analyze-ralph2-data.sh find-runs 20
+
+# List stuck/failed runs
+./scripts/analyze-ralph2-data.sh stuck
+
+# Deep dive on a project
+./scripts/analyze-ralph2-data.sh show <project-uuid>
+```
+
+**Key insight:** Filter by `iterations > 0` to exclude test fixtures. Real runs average 2.0 iterations to completion.
+
+See:
+- `docs/data-analysis-methodology.md` — SQL queries, research workflow, data volumes
+- `docs/soda-loop.md` — The SODA Loop: conceptual model for agentic iteration
 
 ## Known Issues
 

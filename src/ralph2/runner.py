@@ -800,6 +800,38 @@ class Ralph2Runner:
         # This is safer than defaulting to fatal, as retry is harmless
         return True
 
+    def _build_iteration_history(self, run_id: str, current_iteration: int) -> list[dict]:
+        """Build summary of previous iterations for pattern recognition.
+
+        Args:
+            run_id: The run ID
+            current_iteration: Current iteration number (to exclude)
+
+        Returns:
+            List of iteration summaries with number, intent, outcome, and executor summary
+        """
+        iterations = self.db.list_iterations(run_id)
+        history = []
+
+        for it in iterations:
+            if it.number < current_iteration:
+                # Get executor summary if available
+                executor_summary = None
+                agent_outputs = self.db.get_agent_outputs(it.id)
+                for output in agent_outputs:
+                    if output.agent_type == "executor":
+                        executor_summary = output.summary
+                        break
+
+                history.append({
+                    "number": it.number,
+                    "intent": it.intent or "N/A",
+                    "outcome": it.outcome or "N/A",
+                    "executor_summary": executor_summary,
+                })
+
+        return history
+
     async def _run_planner_with_retry(
         self, ctx: IterationContext, human_messages: List[str], max_retries: int = 3
     ) -> Tuple[Optional[dict], Optional[Exception]]:
@@ -815,6 +847,9 @@ class Ralph2Runner:
         """
         last_error = None
 
+        # Build iteration history for pattern recognition
+        iteration_history = self._build_iteration_history(ctx.run_id, ctx.iteration_number)
+
         for attempt in range(max_retries):
             try:
                 result = await run_planner(
@@ -825,7 +860,8 @@ class Ralph2Runner:
                     human_inputs=human_messages if human_messages else None,
                     memory=ctx.memory,
                     project_id=self.project_context.project_id,
-                    root_work_item_id=self.root_work_item_id
+                    root_work_item_id=self.root_work_item_id,
+                    iteration_history=iteration_history if iteration_history else None,
                 )
                 return result, None
             except Exception as e:

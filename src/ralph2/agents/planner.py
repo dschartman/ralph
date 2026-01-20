@@ -54,6 +54,36 @@ When breaking down work:
 
 Don't prescribe specific tests—that's the Executor's job. Your job is to create tasks with clear, testable outcomes.
 
+## Pattern Recognition
+
+Review iteration history to identify recurring patterns:
+- Same test failing multiple iterations → investigate root cause before more fixes
+- Same criterion stuck as unverifiable → may need different approach
+- Repeated "Blocked" from executors → investigate blocker systematically
+
+When you see a pattern of repeated failures (2+ iterations with similar errors), STOP trying the same approach. Create an investigation task instead.
+
+## Investigation Tasks
+
+When root cause is unclear, assign investigation before fixes:
+
+**Pattern to recognize:**
+- Same criterion fails 2+ iterations with similar errors
+- Executor reports "Blocked" or "Uncertain" without clear path forward
+- Verifier says "unverifiable" but no clear reason why
+
+**When this happens:**
+1. Do NOT assign another fix attempt
+2. Create an investigation task: "Investigate: why does X fail?"
+3. Investigation is valid Executor work (they will research, not code)
+4. After root cause is known, decide: fix or deprioritize
+
+**Investigation task template:**
+- Title: "Investigate: <symptom>"
+- Description: "Root cause unknown. Previous attempts: <list>. Goal: identify why <X> happens and recommend fix approach."
+
+This is standard agile practice: spikes before implementation when requirements are unclear.
+
 ## Parallel Execution Rules
 
 You can assign multiple work items to run in parallel. However, parallel executors:
@@ -208,6 +238,7 @@ async def run_planner(
     memory: str = "",
     project_id: Optional[str] = None,
     root_work_item_id: Optional[str] = None,
+    iteration_history: Optional[list[dict]] = None,
 ) -> dict:
     """
     Run the Planner agent.
@@ -221,6 +252,7 @@ async def run_planner(
         memory: Project memory content
         project_id: The project UUID (needed for memory file path)
         root_work_item_id: Root work item ID (spec milestone in Trace)
+        iteration_history: List of previous iteration summaries for pattern recognition
 
     Returns:
         dict with keys: 'result' (PlannerResult), 'full_output' (str), 'messages' (list)
@@ -295,6 +327,22 @@ async def run_planner(
             prompt_parts.append(last_specialist_feedback)
             prompt_parts.append("")
 
+        prompt_parts.append("---")
+        prompt_parts.append("")
+
+    # Add iteration history for pattern recognition
+    if iteration_history:
+        prompt_parts.append("# Iteration History")
+        prompt_parts.append("")
+        prompt_parts.append("Review this history to identify patterns (repeated failures, stuck criteria, etc.):")
+        prompt_parts.append("")
+        for h in iteration_history:
+            prompt_parts.append(f"## Iteration {h['number']}")
+            prompt_parts.append(f"- **Intent:** {h.get('intent', 'N/A')}")
+            prompt_parts.append(f"- **Outcome:** {h.get('outcome', 'N/A')}")
+            if h.get('executor_summary'):
+                prompt_parts.append(f"- **Summary:** {h['executor_summary']}")
+            prompt_parts.append("")
         prompt_parts.append("---")
         prompt_parts.append("")
 

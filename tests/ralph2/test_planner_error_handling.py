@@ -122,13 +122,16 @@ class TestPlannerRetry:
             }
 
         mock_ctx = MagicMock()
+        mock_ctx.run_id = "test-run-id"
+        mock_ctx.iteration_number = 1
         mock_ctx.last_executor_summary = None
         mock_ctx.last_verifier_assessment = None
         mock_ctx.last_specialist_feedback = None
 
         with patch('ralph2.runner.run_planner', side_effect=mock_planner):
             with patch('asyncio.sleep', new_callable=AsyncMock):
-                result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
+                with patch.object(runner, '_build_iteration_history', return_value=[]):
+                    result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
 
         # Should have been called 3 times (2 failures, 1 success)
         assert call_count[0] == 3
@@ -150,12 +153,15 @@ class TestPlannerRetry:
             raise Exception("Invalid API key")
 
         mock_ctx = MagicMock()
+        mock_ctx.run_id = "test-run-id"
+        mock_ctx.iteration_number = 1
         mock_ctx.last_executor_summary = None
         mock_ctx.last_verifier_assessment = None
         mock_ctx.last_specialist_feedback = None
 
         with patch('ralph2.runner.run_planner', side_effect=mock_planner):
-            result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
+            with patch.object(runner, '_build_iteration_history', return_value=[]):
+                result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
 
         # Should have been called only once (fatal error, no retry)
         assert call_count[0] == 1
@@ -178,13 +184,16 @@ class TestPlannerRetry:
             raise Exception("Connection timeout")
 
         mock_ctx = MagicMock()
+        mock_ctx.run_id = "test-run-id"
+        mock_ctx.iteration_number = 1
         mock_ctx.last_executor_summary = None
         mock_ctx.last_verifier_assessment = None
         mock_ctx.last_specialist_feedback = None
 
         with patch('ralph2.runner.run_planner', side_effect=always_fail):
             with patch('asyncio.sleep', new_callable=AsyncMock):
-                result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
+                with patch.object(runner, '_build_iteration_history', return_value=[]):
+                    result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
 
         # Should have been called max_retries times
         assert call_count[0] == 3
@@ -210,12 +219,15 @@ class TestPlannerRetry:
             }
 
         mock_ctx = MagicMock()
+        mock_ctx.run_id = "test-run-id"
+        mock_ctx.iteration_number = 1
         mock_ctx.last_executor_summary = None
         mock_ctx.last_verifier_assessment = None
         mock_ctx.last_specialist_feedback = None
 
         with patch('ralph2.runner.run_planner', side_effect=succeed_immediately):
-            result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
+            with patch.object(runner, '_build_iteration_history', return_value=[]):
+                result, error = await runner._run_planner_with_retry(mock_ctx, [], max_retries=3)
 
         # Should only be called once
         assert call_count[0] == 1
