@@ -968,95 +968,48 @@ class Ralph2Runner:
             Combined executor summary
         """
         if ctx.iteration_plan and ctx.iteration_plan.get("work_items"):
-            return await self._run_parallel_executors(ctx)
+            return await self._run_serial_executors(ctx)
         else:
             return await self._run_single_executor(ctx)
 
-    async def _run_parallel_executors(self, ctx: IterationContext) -> str:
-        """Run multiple executors in parallel with orchestrator-managed worktrees.
+    async def _run_serial_executors(self, ctx: IterationContext) -> str:
+        """Run multiple executors serially on the current branch.
 
-        Lifecycle:
-        1. Create all worktrees BEFORE launching executors
-        2. Run executors in parallel (each in its own worktree)
-        3. Merge completed worktrees SERIALLY after all executors finish
-        4. Cleanup ALL worktrees (guaranteed, even on failure)
-
-        This eliminates race conditions from parallel merges and ensures
-        cleanup happens even if executors fail.
+        Each executor runs one at a time, committing directly to the milestone branch.
+        No worktrees, no merging, no cleanup needed.
         """
         work_items = ctx.iteration_plan["work_items"]
-        print(f"⚙️  Running {len(work_items)} Executors in parallel...")
-
-        # Phase 1: Create all worktrees BEFORE launching executors
-        print("   📦 Creating worktrees...")
-        worktree_info = self._create_worktrees(work_items, ctx.run_id)
-
-        if not worktree_info:
-            print("   ❌ No worktrees created, skipping parallel execution")
-            return "No executors ran - all worktree creations failed"
+        print(f"⚙️  Running {len(work_items)} Executors serially...")
 
         all_summaries = []
-        executor_results = []
 
-        try:
-            # Phase 2: Run executors in parallel
-            print("   🚀 Launching executors...")
-            executor_tasks = [
-                run_executor(
-                    # No iteration_intent - executor reads task from Trace via work_item_id
+        for i, wi in enumerate(work_items):
+            work_item_id = wi["work_item_id"]
+            print(f"   🚀 Executor {i+1}/{len(work_items)} ({work_item_id})...")
+
+            try:
+                result = await run_executor(
                     spec_content=self.spec_content,
                     memory=ctx.memory,
-                    work_item_id=wi["work_item_id"],
+                    work_item_id=work_item_id,
                     run_id=ctx.run_id,
-                    worktree_path=wt_path,  # Orchestrator-managed worktree
+                    # No worktree_path - work directly on current branch
                 )
-                for wi, wt_path, branch_name in worktree_info
-            ]
+            except Exception as e:
+                print(f"   ❌ Executor {i+1} ({work_item_id}) error: {e}")
+                result = self._create_error_executor_result(e)
 
-            executor_results = await asyncio.gather(*executor_tasks, return_exceptions=True)
+            status, summary = result["status"], result["summary"]
+            print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
 
-            # Process results
-            for i, result in enumerate(executor_results):
-                wi, wt_path, branch_name = worktree_info[i]
-                work_item_id = wi["work_item_id"]
-
-                if isinstance(result, Exception):
-                    print(f"   ❌ Executor {i+1} ({work_item_id}) error: {result}")
-                    result = self._create_error_executor_result(result)
-
-                status, summary = result["status"], result["summary"]
-                print(f"   Executor {i+1} ({work_item_id}) - Status: {status}")
-
-                executor_output_path = self._save_agent_messages(
-                    ctx.iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
-                )
-                self.db.create_agent_output(AgentOutput(
-                    id=None, iteration_id=ctx.iteration_id, agent_type=f"executor_{i+1}",
-                    raw_output_path=executor_output_path, summary=summary
-                ))
-                all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
-
-            # Phase 3: Merge completed worktrees SERIALLY
-            # Only merge worktrees where executor completed successfully
-            completed = [
-                (wi, wt_path, branch)
-                for (wi, wt_path, branch), result in zip(worktree_info, executor_results)
-                if not isinstance(result, Exception) and result.get("status") == "Completed"
-            ]
-
-            if completed:
-                print(f"   🔀 Merging {len(completed)} completed worktrees...")
-                failed_merges = await self._merge_worktrees_serial(completed)
-                if failed_merges:
-                    for work_item_id, error_msg in failed_merges:
-                        all_summaries.append(f"Merge failed for {work_item_id}: {error_msg}")
-            else:
-                print("   ⚠️  No completed executors to merge")
-
-        finally:
-            # Phase 4: Cleanup ALL worktrees (guaranteed)
-            print("   🧹 Cleaning up worktrees...")
-            self._cleanup_all_worktrees(worktree_info)
+            executor_output_path = self._save_agent_messages(
+                ctx.iteration_id, f"executor_{i+1}_{work_item_id}", result["messages"]
+            )
+            self.db.create_agent_output(AgentOutput(
+                id=None, iteration_id=ctx.iteration_id, agent_type=f"executor_{i+1}",
+                raw_output_path=executor_output_path, summary=summary
+            ))
+            all_summaries.append(f"Executor {i+1} ({work_item_id}):\n{summary}")
 
         print()
         return "\n\n".join(all_summaries)
