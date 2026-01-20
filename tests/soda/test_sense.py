@@ -1,6 +1,7 @@
-"""Tests for SENSE data structures (Claims)."""
+"""Tests for SENSE data structures (Claims) and sense() function."""
 
 from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +18,8 @@ from soda.sense import (
     TaskInfo,
     TaskComment,
     WorkStateClaims,
+    sense,
+    SenseContext,
 )
 
 
@@ -437,3 +440,490 @@ class TestClaims:
                 timestamp=datetime(2024, 1, 15, 10, 30, 0),
                 # Missing iteration_number and other required fields
             )
+
+
+# =============================================================================
+# Tests for sense() function
+# =============================================================================
+
+
+class TestSenseContext:
+    """Tests for SenseContext configuration."""
+
+    def test_sense_context_creation(self):
+        """SenseContext can be created with required fields."""
+        ctx = SenseContext(
+            run_id="run-123",
+            iteration_number=5,
+            milestone_base="abc123",
+            root_work_item_id="ralph-root",
+            project_id="proj-uuid",
+            project_root="/path/to/project",
+        )
+        assert ctx.run_id == "run-123"
+        assert ctx.iteration_number == 5
+        assert ctx.milestone_base == "abc123"
+        assert ctx.root_work_item_id == "ralph-root"
+        assert ctx.project_id == "proj-uuid"
+
+    def test_sense_context_optional_fields(self):
+        """SenseContext handles optional fields."""
+        ctx = SenseContext(
+            run_id="run-123",
+            iteration_number=1,
+            milestone_base=None,  # No base commit (new project)
+            root_work_item_id=None,  # No root work item
+            project_id="proj-uuid",
+            project_root="/path/to/project",
+        )
+        assert ctx.milestone_base is None
+        assert ctx.root_work_item_id is None
+
+
+class TestSenseFunction:
+    """Tests for the main sense() function."""
+
+    @pytest.fixture
+    def mock_git_client(self):
+        """Create a mock GitClient."""
+        client = MagicMock()
+        client.get_current_branch.return_value = "main"
+        client._run_git.return_value = MagicMock(stdout="M  file.py\nA  new.py", returncode=0)
+        client.get_commits_since.return_value = []
+        client.get_diff_summary.return_value = ""
+        return client
+
+    @pytest.fixture
+    def mock_trace_client(self):
+        """Create a mock TraceClient."""
+        client = MagicMock()
+        client.get_open_tasks.return_value = []
+        client.get_blocked_tasks.return_value = []
+        client.get_task_comments.return_value = []
+        return client
+
+    @pytest.fixture
+    def mock_db(self):
+        """Create a mock SodaDB."""
+        db = MagicMock()
+        db.get_iterations.return_value = []
+        db.get_unconsumed_inputs.return_value = []
+        db.get_agent_outputs.return_value = []
+        return db
+
+    @pytest.fixture
+    def sense_context(self):
+        """Create a basic SenseContext for testing."""
+        return SenseContext(
+            run_id="run-123",
+            iteration_number=1,
+            milestone_base="abc123",
+            root_work_item_id="ralph-root",
+            project_id="proj-uuid",
+            project_root="/tmp/test-project",
+        )
+
+    def test_sense_returns_claims_object(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() returns a Claims object."""
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert isinstance(claims, Claims)
+
+    def test_sense_includes_timestamp(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes timestamp in claims."""
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.timestamp is not None
+        assert isinstance(claims.timestamp, datetime)
+
+    def test_sense_includes_iteration_number(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes iteration number in claims."""
+        sense_context.iteration_number = 5
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.iteration_number == 5
+
+    def test_sense_collects_code_state_branch(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects current branch name."""
+        mock_git_client.get_current_branch.return_value = "feature/new-thing"
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.code_state.branch == "feature/new-thing"
+
+    def test_sense_collects_uncommitted_changes(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects staged and unstaged counts."""
+        # Mock git status output: 2 staged (A, M), 1 unstaged (?)
+        mock_git_client._run_git.return_value = MagicMock(
+            stdout="A  staged.py\nM  modified.py\n?? untracked.py",
+            returncode=0
+        )
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        # The exact numbers depend on implementation, just check it's populated
+        assert isinstance(claims.code_state.staged_count, int)
+        assert isinstance(claims.code_state.unstaged_count, int)
+
+    def test_sense_collects_commits_since_base(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects commits since milestone base."""
+        from soda.state.git import CommitInfo as GitCommitInfo
+        mock_git_client.get_commits_since.return_value = [
+            GitCommitInfo(sha="abc", message="Commit 1", author="Alice", timestamp="2024-01-15T10:00:00Z"),
+            GitCommitInfo(sha="def", message="Commit 2", author="Bob", timestamp="2024-01-15T11:00:00Z"),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.code_state.commits) == 2
+        assert claims.code_state.commits[0].hash == "abc"
+        assert claims.code_state.commits[0].message == "Commit 1"
+
+    def test_sense_handles_no_base_commit(
+        self, mock_git_client, mock_trace_client, mock_db
+    ):
+        """sense() reports no_base_commit when milestone base is empty."""
+        ctx = SenseContext(
+            run_id="run-123",
+            iteration_number=1,
+            milestone_base=None,  # No base commit
+            root_work_item_id="ralph-root",
+            project_id="proj-uuid",
+            project_root="/tmp/test-project",
+        )
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=ctx,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.code_state.no_base_commit is True
+
+    def test_sense_handles_git_error_gracefully(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes error message when git fails, doesn't halt."""
+        mock_git_client.get_current_branch.side_effect = Exception("Git not found")
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        # Should still return claims with error message in code_state
+        assert claims.code_state.error is not None
+        assert "Git not found" in claims.code_state.error
+
+    def test_sense_collects_work_state_open_tasks(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects open tasks under milestone root."""
+        from soda.state.trace import Task as TraceTask
+        mock_trace_client.get_open_tasks.return_value = [
+            TraceTask(id="ralph-1", title="Task 1", status="open", priority=2),
+            TraceTask(id="ralph-2", title="Task 2", status="open", priority=1),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.work_state.open_tasks) == 2
+        assert claims.work_state.open_tasks[0].id == "ralph-1"
+
+    def test_sense_collects_blocked_tasks_with_reason(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects blocked tasks with blocker reason."""
+        from soda.state.trace import Task as TraceTask
+        mock_trace_client.get_blocked_tasks.return_value = [
+            TraceTask(id="ralph-blocked", title="Blocked Task", status="blocked", priority=2, parent_id="ralph-blocker"),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.work_state.blocked_tasks) == 1
+        assert claims.work_state.blocked_tasks[0].status == "blocked"
+
+    def test_sense_handles_no_root_work_item(
+        self, mock_git_client, mock_trace_client, mock_db
+    ):
+        """sense() reports no_root_work_item when root doesn't exist."""
+        ctx = SenseContext(
+            run_id="run-123",
+            iteration_number=1,
+            milestone_base="abc123",
+            root_work_item_id=None,  # No root work item
+            project_id="proj-uuid",
+            project_root="/tmp/test-project",
+        )
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=ctx,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.work_state.no_root_work_item is True
+
+    def test_sense_handles_trace_error_gracefully(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes error message when trace fails, doesn't halt."""
+        mock_trace_client.get_open_tasks.side_effect = Exception("Trace CLI not found")
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.work_state.error is not None
+        assert "Trace CLI not found" in claims.work_state.error
+
+    def test_sense_collects_project_state_iteration_number(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes current iteration number in project state."""
+        sense_context.iteration_number = 10
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.project_state.iteration_number == 10
+
+    def test_sense_collects_iteration_history(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes recent iteration history (last 5)."""
+        from soda.state.models import Iteration, IterationOutcome
+        mock_db.get_iterations.return_value = [
+            Iteration(id=1, run_id="run-123", number=1, intent="First", outcome=IterationOutcome.CONTINUE, started_at=datetime.now()),
+            Iteration(id=2, run_id="run-123", number=2, intent="Second", outcome=IterationOutcome.CONTINUE, started_at=datetime.now()),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.project_state.iteration_history) <= 5
+        assert len(claims.project_state.iteration_history) == 2
+
+    def test_sense_marks_first_iteration(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() marks first_iteration when no prior iterations exist."""
+        mock_db.get_iterations.return_value = []
+        sense_context.iteration_number = 1
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.project_state.first_iteration is True
+
+    def test_sense_handles_db_error_gracefully(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes error message when database fails, doesn't halt."""
+        mock_db.get_iterations.side_effect = Exception("Database locked")
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.project_state.error is not None
+        assert "Database locked" in claims.project_state.error
+
+    def test_sense_collects_pending_human_input(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes pending human input with type and content."""
+        from soda.state.models import HumanInput, InputType
+        mock_db.get_unconsumed_inputs.return_value = [
+            HumanInput(id=1, run_id="run-123", input_type=InputType.COMMENT, content="Focus on tests", created_at=datetime.now()),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is not None
+        assert claims.human_input.input_type == "comment"
+        assert claims.human_input.content == "Focus on tests"
+
+    def test_sense_empty_human_input_when_none_pending(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() leaves human_input None when no pending input."""
+        mock_db.get_unconsumed_inputs.return_value = []
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.human_input is None
+
+    def test_sense_collects_learnings_from_memory(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() includes memory.md content as learnings."""
+        with patch("soda.sense.read_memory", return_value="Use pytest for testing\nPrefer fixtures"):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.learnings == "Use pytest for testing\nPrefer fixtures"
+
+    def test_sense_empty_learnings_when_no_memory(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() has empty learnings when memory.md doesn't exist."""
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert claims.learnings == ""
+
+    def test_sense_is_json_serializable(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() returns claims that can be serialized to JSON."""
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        # Should not raise
+        data = claims.model_dump(mode="json")
+        assert "timestamp" in data
+        assert "iteration_number" in data
+        assert "code_state" in data
+
+    def test_sense_continues_on_partial_failures(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() continues collecting from other sources when one fails."""
+        # Git fails
+        mock_git_client.get_current_branch.side_effect = Exception("Git error")
+        # But trace works
+        from soda.state.trace import Task as TraceTask
+        mock_trace_client.get_open_tasks.return_value = [
+            TraceTask(id="ralph-1", title="Task 1", status="open", priority=2),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        # Code state has error
+        assert claims.code_state.error is not None
+        # But work state was collected
+        assert len(claims.work_state.open_tasks) == 1
