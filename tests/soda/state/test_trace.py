@@ -336,6 +336,69 @@ class TestTraceClientRunCommand:
         assert "trc not found" in str(exc_info.value)
 
 
+class TestTraceClientGetClosedTasks:
+    """Tests for TraceClient.get_closed_tasks()."""
+
+    def test_get_closed_tasks_parses_list_output(self):
+        """get_closed_tasks parses trc list --status closed output correctly."""
+        client = TraceClient()
+        mock_output = """● ralph-done1 [P2] Completed task one
+   └─ child of: ralph-parent - Parent task
+● ralph-done2 [P1] Completed task two
+"""
+        with patch.object(client, "_run_command", return_value=mock_output):
+            tasks = client.get_closed_tasks()
+
+        assert len(tasks) == 2
+        assert tasks[0].id == "ralph-done1"
+        assert tasks[0].title == "Completed task one"
+        assert tasks[0].priority == 2
+        assert tasks[0].status == "closed"
+        assert tasks[0].parent_id == "ralph-parent"
+
+        assert tasks[1].id == "ralph-done2"
+        assert tasks[1].title == "Completed task two"
+        assert tasks[1].priority == 1
+        assert tasks[1].status == "closed"
+        assert tasks[1].parent_id is None
+
+    def test_get_closed_tasks_with_root_filter(self):
+        """get_closed_tasks filters by root_id."""
+        client = TraceClient()
+        mock_output = """● ralph-done1 [P2] Completed child
+   └─ child of: ralph-root - Root task
+● ralph-done2 [P2] Other completed
+   └─ child of: ralph-different - Different parent
+"""
+        with patch.object(client, "_run_command", return_value=mock_output):
+            tasks = client.get_closed_tasks(root_id="ralph-root")
+
+        # Should only return tasks under ralph-root
+        assert len(tasks) == 1
+        assert tasks[0].id == "ralph-done1"
+
+    def test_get_closed_tasks_handles_empty_output(self):
+        """get_closed_tasks handles empty results."""
+        client = TraceClient()
+        mock_output = ""
+        with patch.object(client, "_run_command", return_value=mock_output):
+            tasks = client.get_closed_tasks()
+
+        assert tasks == []
+
+    def test_get_closed_tasks_calls_trc_with_status_flag(self):
+        """get_closed_tasks calls trc list with --status closed."""
+        client = TraceClient()
+        with patch.object(client, "_run_command", return_value="") as mock_run:
+            client.get_closed_tasks()
+
+        call_args = mock_run.call_args[0][0]
+        assert "trc" in call_args
+        assert "list" in call_args
+        assert "--status" in call_args
+        assert "closed" in call_args
+
+
 class TestTraceError:
     """Tests for TraceError exception."""
 

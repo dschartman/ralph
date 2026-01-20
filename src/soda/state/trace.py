@@ -105,6 +105,25 @@ class TraceClient:
 
         return tasks
 
+    def get_closed_tasks(self, root_id: Optional[str] = None) -> list[Task]:
+        """Get closed tasks.
+
+        Uses `trc list --status closed` to find closed tasks.
+
+        Args:
+            root_id: Optional root task ID to filter by.
+
+        Returns:
+            List of closed tasks.
+        """
+        output = self._run_command(["trc", "list", "--status", "closed"])
+        tasks = self._parse_closed_task_list(output)
+
+        if root_id:
+            tasks = [t for t in tasks if t.parent_id == root_id]
+
+        return tasks
+
     def get_task_comments(self, task_id: str) -> list[Comment]:
         """Get comments on a task.
 
@@ -291,6 +310,53 @@ class TraceClient:
                             parent_id=parent_id,
                         )
                     )
+
+            i += 1
+
+        return tasks
+
+    def _parse_closed_task_list(self, output: str) -> list[Task]:
+        """Parse trc list --status closed output into Task objects.
+
+        Output format (closed tasks use filled circle ●):
+            ● ralph-abc123 [P2] Completed task
+               └─ child of: ralph-parent - Parent title
+            ● ralph-def456 [P1] Another completed task
+        """
+        tasks = []
+        lines = output.split("\n")
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+
+            # Match task line: ● ralph-id [P#] Title
+            task_match = re.match(r"^●\s+(\S+)\s+\[P(\d+)\]\s+(.+)$", line)
+            if task_match:
+                task_id = task_match.group(1)
+                priority = int(task_match.group(2))
+                title = task_match.group(3)
+
+                # Check next line for parent
+                parent_id = None
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    parent_match = re.match(
+                        r"^\s+└─\s+child of:\s+(\S+)\s+-\s+",
+                        next_line,
+                    )
+                    if parent_match:
+                        parent_id = parent_match.group(1)
+
+                tasks.append(
+                    Task(
+                        id=task_id,
+                        title=title,
+                        status="closed",
+                        priority=priority,
+                        parent_id=parent_id,
+                    )
+                )
 
             i += 1
 

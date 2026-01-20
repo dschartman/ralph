@@ -437,9 +437,16 @@ def _collect_work_state(
             for t in blocked_trace_tasks
         ]
 
-        # Closed tasks would require another trace command - for now return empty
-        # This could be extended with a get_closed_tasks method
-        closed_tasks: list[TaskInfo] = []
+        # Get closed tasks
+        closed_trace_tasks = trace_client.get_closed_tasks(root_id=root_work_item_id)
+        closed_tasks = [
+            TaskInfo(
+                id=t.id,
+                title=t.title,
+                status="closed",
+            )
+            for t in closed_trace_tasks
+        ]
 
         # Get recent comments (last 10)
         # For each task, get comments and merge

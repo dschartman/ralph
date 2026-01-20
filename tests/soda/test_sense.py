@@ -499,6 +499,7 @@ class TestSenseFunction:
         client = MagicMock()
         client.get_open_tasks.return_value = []
         client.get_blocked_tasks.return_value = []
+        client.get_closed_tasks.return_value = []
         client.get_task_comments.return_value = []
         return client
 
@@ -708,6 +709,29 @@ class TestSenseFunction:
 
         assert len(claims.work_state.blocked_tasks) == 1
         assert claims.work_state.blocked_tasks[0].status == "blocked"
+
+    def test_sense_collects_closed_tasks(
+        self, mock_git_client, mock_trace_client, mock_db, sense_context
+    ):
+        """sense() collects closed tasks separately."""
+        from soda.state.trace import Task as TraceTask
+        mock_trace_client.get_closed_tasks.return_value = [
+            TraceTask(id="ralph-done1", title="Completed Task 1", status="closed", priority=2),
+            TraceTask(id="ralph-done2", title="Completed Task 2", status="closed", priority=1),
+        ]
+
+        with patch("soda.sense.read_memory", return_value=""):
+            claims = sense(
+                ctx=sense_context,
+                git_client=mock_git_client,
+                trace_client=mock_trace_client,
+                db=mock_db,
+            )
+
+        assert len(claims.work_state.closed_tasks) == 2
+        assert claims.work_state.closed_tasks[0].id == "ralph-done1"
+        assert claims.work_state.closed_tasks[0].status == "closed"
+        assert claims.work_state.closed_tasks[1].id == "ralph-done2"
 
     def test_sense_handles_no_root_work_item(
         self, mock_git_client, mock_trace_client, mock_db
