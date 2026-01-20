@@ -63,6 +63,7 @@ class NarrowAgent:
         output_schema: Type[T],
         tools: Optional[list[str]] = None,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> T:
         """Invoke the agent with a prompt and return structured output.
 
@@ -71,6 +72,7 @@ class NarrowAgent:
             output_schema: Pydantic model class for output validation.
             tools: Optional list of allowed tools. None means all tools.
             model: Optional model override. Defaults to claude-sonnet.
+            system_prompt: Optional system prompt to guide agent behavior.
 
         Returns:
             Parsed output matching the provided schema.
@@ -82,7 +84,9 @@ class NarrowAgent:
         """
         # Execute with async retry handling
         raw_output = await self._retry_handler.execute_with_retry_async(
-            lambda: self._call_agent(prompt=prompt, tools=tools, model=model)
+            lambda: self._call_agent(
+                prompt=prompt, tools=tools, model=model, system_prompt=system_prompt
+            )
         )
 
         # Validate and parse output
@@ -98,6 +102,7 @@ class NarrowAgent:
         prompt: str,
         tools: Optional[list[str]] = None,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         """Call the underlying Claude agent.
 
@@ -108,6 +113,7 @@ class NarrowAgent:
             prompt: The prompt to send.
             tools: Optional tool allowlist.
             model: Optional model override.
+            system_prompt: Optional system prompt for the agent.
 
         Returns:
             Raw JSON string output from the agent.
@@ -119,6 +125,7 @@ class NarrowAgent:
             allowed_tools=tools or [],
             model=model,
             permission_mode="bypassPermissions",
+            system_prompt=system_prompt,
         )
 
         # Collect response

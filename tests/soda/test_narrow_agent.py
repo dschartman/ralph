@@ -447,3 +447,104 @@ class TestNarrowAgentModel:
 
         call_kwargs = mock_call.call_args.kwargs
         assert call_kwargs.get('model') == "claude-opus-4-20250514"
+
+
+class TestNarrowAgentSystemPrompt:
+    """Test NarrowAgent system_prompt parameter functionality."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_without_system_prompt(self):
+        """WHEN invoke() called without system_prompt THEN it is None."""
+        from soda.agents.narrow import NarrowAgent
+
+        agent = NarrowAgent()
+
+        with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = '{"result": "success"}'
+
+            await agent.invoke(
+                prompt="Test prompt",
+                output_schema=SimpleOutput
+            )
+
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs.get('system_prompt') is None
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_system_prompt(self):
+        """WHEN invoke() called with system_prompt THEN it is passed to agent."""
+        from soda.agents.narrow import NarrowAgent
+
+        agent = NarrowAgent()
+
+        test_system_prompt = "You are a helpful assistant that follows instructions carefully."
+
+        with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = '{"result": "success"}'
+
+            await agent.invoke(
+                prompt="Test prompt",
+                output_schema=SimpleOutput,
+                system_prompt=test_system_prompt
+            )
+
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs.get('system_prompt') == test_system_prompt
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_long_system_prompt(self):
+        """WHEN invoke() called with long system_prompt THEN it is passed fully."""
+        from soda.agents.narrow import NarrowAgent
+
+        agent = NarrowAgent()
+
+        # Simulate ORIENT-style system prompt (long, detailed instructions)
+        long_system_prompt = """You are the ORIENT agent in the SODA loop.
+
+Your responsibilities:
+1. Verify claims against the codebase
+2. Assess spec satisfaction
+3. Update task breakdown
+4. Plan the iteration
+
+Key behaviors:
+- When claims say a task is closed, verify the code actually implements it
+- When a task is marked closed but code doesn't implement it, flag discrepancy
+- When assessing spec, evaluate each acceptance criterion individually
+""" * 10  # Make it even longer
+
+        with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = '{"result": "success"}'
+
+            await agent.invoke(
+                prompt="Test prompt",
+                output_schema=SimpleOutput,
+                system_prompt=long_system_prompt
+            )
+
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs.get('system_prompt') == long_system_prompt
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_all_parameters(self):
+        """WHEN invoke() called with all parameters THEN all are passed."""
+        from soda.agents.narrow import NarrowAgent
+
+        agent = NarrowAgent()
+
+        with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = '{"result": "success"}'
+
+            await agent.invoke(
+                prompt="Test prompt",
+                output_schema=SimpleOutput,
+                tools=["Read", "Grep"],
+                model="claude-sonnet-4-20250514",
+                system_prompt="You are an analysis agent."
+            )
+
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs.get('prompt') == "Test prompt"
+        assert call_kwargs.get('tools') == ["Read", "Grep"]
+        assert call_kwargs.get('model') == "claude-sonnet-4-20250514"
+        assert call_kwargs.get('system_prompt') == "You are an analysis agent."
