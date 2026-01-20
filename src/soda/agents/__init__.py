@@ -6,4 +6,7 @@ This module provides agent invocation patterns:
 - bookended_agent: Setup + main work + wrap-up patterns
 """
 
-__all__: list[str] = []
+from soda.agents.narrow import NarrowAgent
+from soda.agents.walked import WalkedAgent
+
+__all__: list[str] = ["NarrowAgent", "WalkedAgent"]
