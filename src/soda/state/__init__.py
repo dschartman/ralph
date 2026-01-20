@@ -1,5 +1,6 @@
 """Soda state layer for persistent state management."""
 
+from soda.state.db import SodaDB
 from soda.state.git import (
     CommitInfo,
     GitClient,
@@ -35,6 +36,7 @@ __all__ = [
     "IterationOutcome",
     "Run",
     "RunStatus",
+    "SodaDB",
     "Task",
     "TraceClient",
     "TraceError",
