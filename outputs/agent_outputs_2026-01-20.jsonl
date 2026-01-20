@@ -94,3 +94,39 @@
 {"timestamp": "2026-01-20T18:45:45.237054+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
 {"timestamp": "2026-01-20T18:45:45.238440+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
 {"timestamp": "2026-01-20T18:45:45.238851+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T18:48:45.049229+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.051544+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:48:45.052912+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.054061+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.055108+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.056093+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.361001+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.742550+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.744881+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:48:45.780427+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:48:45.781744+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:48:45.782120+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T18:51:54.011802+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.014288+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T18:51:54.015605+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.016789+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.017909+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.018868+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.434680+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.879318+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.882717+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T18:51:54.922290+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:51:54.923613+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T18:51:54.924024+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
+{"timestamp": "2026-01-20T19:55:27.946549+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:27.948678+00:00", "agent_type": "narrow", "prompt_summary": "Analyze the code", "output": "{\"findings\": [\"Issue 1\", \"Issue 2\"], \"severity\": \"high\", \"recommendation\": \"Fix immediately\"}"}
+{"timestamp": "2026-01-20T19:55:27.949818+00:00", "agent_type": "narrow", "prompt_summary": "My test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:27.950800+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:27.951726+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:27.952614+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:28.192839+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:28.646365+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:28.649358+00:00", "agent_type": "narrow", "prompt_summary": "Test prompt", "output": "{\"result\": \"success\"}"}
+{"timestamp": "2026-01-20T19:55:28.690655+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T19:55:28.691909+00:00", "agent_type": "walked", "prompt_summary": "Hello", "output": {"system_prompt": null, "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Response"}]}}
+{"timestamp": "2026-01-20T19:55:28.692299+00:00", "agent_type": "walked", "prompt_summary": "", "output": {"system_prompt": null, "messages": []}}
