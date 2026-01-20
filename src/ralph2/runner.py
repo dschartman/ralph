@@ -1318,10 +1318,21 @@ class Ralph2Runner:
         run.config["max_iterations"] = max_iterations
         print(f"♻️  Resuming interrupted Ralph2 run: {run.id}\n📋 Spec: {self.spec_path}")
 
-        # Restore milestone branch from the run record
+        # Restore milestone branch from the run record and checkout
         if run.milestone_branch:
             self._milestone_branch = run.milestone_branch
             print(f"🌿 Milestone branch: {run.milestone_branch}")
+            # Checkout the milestone branch so all work happens there
+            cwd = str(self.project_context.project_root)
+            result = subprocess.run(
+                ["git", "checkout", run.milestone_branch],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=False
+            )
+            if result.returncode != 0:
+                print(f"   ⚠️  Warning: Could not checkout milestone branch: {result.stderr}")
         else:
             self._milestone_branch = None
 
@@ -1380,6 +1391,16 @@ class Ralph2Runner:
         # Create the branch if it doesn't exist
         if _create_milestone_branch(branch_name, cwd):
             self._milestone_branch = branch_name
+            # Checkout the milestone branch so all work happens there
+            result = subprocess.run(
+                ["git", "checkout", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=False
+            )
+            if result.returncode != 0:
+                print(f"   ⚠️  Warning: Could not checkout milestone branch {branch_name}: {result.stderr}")
             return branch_name
         else:
             print(f"   ⚠️  Warning: Could not create milestone branch {branch_name}")
