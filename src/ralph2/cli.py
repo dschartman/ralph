@@ -1,0 +1,559 @@
+"""CLI interface for Ralph2 using Typer."""
+
+import asyncio
+import logging
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+import subprocess
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from .runner import run_ralph2, Ralph2Runner
+from .state.db import Ralph2DB
+from .state.models import HumanInput
+from .project import ProjectContext, ensure_ralph2_id_in_gitignore, find_project_root
+
+# Configure logging so warnings are visible (e.g., cleanup failures in git.py)
+# Use WARNING level by default to avoid noise, but ensure critical warnings are shown
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(levelname)s: %(name)s: %(message)s",
+)
+
+app = typer.Typer(help="Ralph2 - Multi-Agent Architecture for Spec-Driven Development")
+console = Console()
+
+
+def _validate_prerequisites() -> bool:
+    """
+    Validate that all prerequisites are met before running Ralph2.
+
+    Checks:
+    1. Running inside a git repository
+    2. trc command is available
+    3. Initializes Trace if needed
+    4. Adds .ralph2-id to .gitignore
+
+    Returns:
+        True if all prerequisites are met, False otherwise
+    """
+    # Check for git repository
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            console.print("[red]Error:[/red] Not in a git repository")
+            console.print("Ralph2 requires a git repository to track changes.")
+            console.print("\nInitialize one with: [cyan]git init[/cyan]")
+            return False
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] git command not found")
+        console.print("Ralph2 requires git to be installed.")
+        return False
+
+    # Check for trc command
+    try:
+        result = subprocess.run(
+            ["trc", "--help"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            console.print("[red]Error:[/red] trc command not available")
+            console.print("Ralph2 requires the Trace CLI (trc) to be installed.")
+            console.print("\nInstall it from: [cyan]https://github.com/trevorklee/trace[/cyan]")
+            return False
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] trc command not found")
+        console.print("Ralph2 requires the Trace CLI (trc) to be installed.")
+        console.print("\nInstall it from: [cyan]https://github.com/trevorklee/trace[/cyan]")
+        return False
+
+    # Initialize Trace if needed
+    trace_dir = Path(".trace")
+    if not trace_dir.exists():
+        console.print("[yellow]Trace not initialized. Initializing...[/yellow]")
+        result = subprocess.run(
+            ["trc", "init"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Error:[/red] Failed to initialize Trace: {result.stderr}")
+            return False
+        console.print("[green]✓[/green] Trace initialized")
+
+    # Add .ralph2-id to .gitignore
+    project_root = find_project_root()
+    if project_root:
+        if ensure_ralph2_id_in_gitignore(project_root):
+            console.print("[green]✓[/green] Added .ralph2-id to .gitignore")
+
+    return True
+
+
+def _get_work_item_spec(work_item_id: str) -> Optional[str]:
+    """Fetch work item description from trace to use as spec."""
+    try:
+        result = subprocess.run(
+            ["trc", "show", work_item_id],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Parse the output to extract title and description
+        lines = result.stdout.strip().split('\n')
+        title = ""
+        description_lines = []
+        in_description = False
+
+        for line in lines:
+            if line.startswith("Title:"):
+                title = line.replace("Title:", "").strip()
+            elif line.startswith("Description:"):
+                in_description = True
+            elif in_description and not line.startswith("Children:"):
+                description_lines.append(line)
+            elif line.startswith("Children:"):
+                break
+
+        description = '\n'.join(description_lines).strip()
+        return f"# {title}\n\n{description}" if description else f"# {title}"
+    except subprocess.CalledProcessError:
+        return None
+
+
+@app.command()
+def run(
+    spec: Optional[str] = typer.Argument(None, help="Spec file path or inline spec content"),
+    max_iterations: int = typer.Option(50, help="Maximum number of iterations to run"),
+    root_work_item: Optional[str] = typer.Option(None, "--root-work-item", help="Root work item ID (spec milestone in Trace)"),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Milestone branch name (auto-generated from spec title if not provided)")
+):
+    """
+    Run Ralph2 with a spec.
+
+    Provide exactly one of:
+      - A file path: ralph2 run myspec.md
+      - Inline content: ralph2 run "# My Spec\\n\\nDo something"
+      - A trace work item: ralph2 run --root-work-item ralph-abc123
+
+    The --branch option specifies the milestone branch for this run. All executor work
+    will be isolated to this branch. If not provided, a branch is auto-generated from
+    the spec title (e.g., feature/my-feature-title).
+    """
+    # Validate prerequisites
+    if not _validate_prerequisites():
+        raise typer.Exit(1)
+
+    # Determine spec source - must be explicit
+    spec_content = None
+    spec_path = None
+
+    if root_work_item:
+        # Use trace work item as spec
+        spec_content = _get_work_item_spec(root_work_item)
+        if not spec_content:
+            console.print(f"[red]Error:[/red] Could not fetch work item {root_work_item}")
+            raise typer.Exit(1)
+        console.print(f"[dim]Using work item {root_work_item} as spec[/dim]")
+    elif spec:
+        # Check if it's a file path or inline content
+        if Path(spec).exists():
+            spec_path = spec
+            console.print(f"[dim]Using spec file: {spec}[/dim]")
+        else:
+            # Treat as inline spec content
+            spec_content = spec
+            console.print("[dim]Using inline spec content[/dim]")
+    else:
+        console.print("[red]Error:[/red] No spec provided.")
+        console.print("\nUsage:")
+        console.print("  ralph2 run <file>              # Use a spec file")
+        console.print("  ralph2 run \"<content>\"         # Use inline spec content")
+        console.print("  ralph2 run --root-work-item ID # Use a Trace work item")
+        raise typer.Exit(1)
+
+    # Get project context (always use git root, no Ralph2file search)
+    try:
+        ctx = ProjectContext(require_spec=False)
+        console.print(f"[dim]Project ID: {ctx.project_id}[/dim]")
+        console.print(f"[dim]State dir: {ctx.state_dir}[/dim]")
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    # Run Ralph2
+    try:
+        runner = Ralph2Runner(
+            spec_path=spec_path,
+            project_context=ctx,
+            root_work_item_id=root_work_item,
+            spec_content=spec_content,
+            branch=branch
+        )
+        status = asyncio.run(runner.run(max_iterations))
+
+        if status == "completed":
+            console.print("\n[green]✅ Ralph2 completed successfully![/green]")
+        elif status == "stuck":
+            console.print("\n[yellow]⚠️  Ralph2 is stuck and cannot make progress.[/yellow]")
+        elif status == "paused":
+            console.print("\n[blue]⏸️  Ralph2 paused by user.[/blue]")
+        elif status == "aborted":
+            console.print("\n[red]🛑 Ralph2 aborted by user.[/red]")
+        elif status == "max_iterations":
+            console.print(f"\n[yellow]⏱️  Max iterations ({max_iterations}) reached.[/yellow]")
+
+        runner.close()
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠️  Interrupted by user[/yellow]")
+        raise typer.Exit(130)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def status():
+    """
+    Show current run status.
+
+    Displays information about the most recent Ralph2 run.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[yellow]No Ralph2 project found[/yellow] (no Ralph2file)")
+        return
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[yellow]No Ralph2 runs found[/yellow] (no database)")
+        return
+
+    db = Ralph2DB(str(db_path))
+    try:
+        run = db.get_latest_run()
+        if not run:
+            console.print("[yellow]No Ralph2 runs found[/yellow]")
+            return
+
+        # Create status table
+        table = Table(title="Current Ralph2 Run")
+        table.add_column("Field", style="cyan")
+        table.add_column("Value", style="white")
+
+        table.add_row("Run ID", run.id)
+        table.add_row("Status", _format_status(run.status))
+        table.add_row("Spec", run.spec_path)
+        if run.milestone_branch:
+            table.add_row("Branch", run.milestone_branch)
+        table.add_row("Started", run.started_at.strftime("%Y-%m-%d %H:%M:%S"))
+
+        if run.ended_at:
+            table.add_row("Ended", run.ended_at.strftime("%Y-%m-%d %H:%M:%S"))
+            duration = run.ended_at - run.started_at
+            table.add_row("Duration", str(duration))
+
+        console.print(table)
+
+        # Show iterations
+        iterations = db.list_iterations(run.id)
+        if iterations:
+            console.print(f"\n[bold]Iterations:[/bold] {len(iterations)}")
+
+            for iteration in iterations[-5:]:  # Show last 5
+                console.print(f"  {iteration.number}. {iteration.intent[:80]}..." if len(iteration.intent) > 80 else f"  {iteration.number}. {iteration.intent}")
+                console.print(f"     → {iteration.outcome}")
+
+    finally:
+        db.close()
+
+
+@app.command()
+def history(
+    limit: int = typer.Option(10, help="Number of runs to show")
+):
+    """
+    Show past Ralph2 runs.
+
+    Lists historical runs with their status and basic information.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[yellow]No Ralph2 project found[/yellow] (no Ralph2file)")
+        return
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[yellow]No Ralph2 runs found[/yellow] (no database)")
+        return
+
+    db = Ralph2DB(str(db_path))
+    try:
+        runs = db.list_runs()
+        if not runs:
+            console.print("[yellow]No Ralph2 runs found[/yellow]")
+            return
+
+        # Create history table
+        table = Table(title=f"Ralph2 Run History (last {limit})")
+        table.add_column("Run ID", style="cyan")
+        table.add_column("Status", style="white")
+        table.add_column("Started", style="white")
+        table.add_column("Iterations", style="white", justify="right")
+        table.add_column("Spec", style="white")
+
+        for run in runs[:limit]:
+            iterations = db.list_iterations(run.id)
+            table.add_row(
+                run.id,
+                _format_status(run.status),
+                run.started_at.strftime("%Y-%m-%d %H:%M:%S"),
+                str(len(iterations)),
+                run.spec_path
+            )
+
+        console.print(table)
+
+    finally:
+        db.close()
+
+
+@app.command()
+def input(
+    message: str = typer.Argument(..., help="Comment or message for next iteration")
+):
+    """
+    Add human input for the next iteration.
+
+    The message will be read by the Planner at the start of the next iteration.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[red]Error:[/red] No Ralph2 project found (no Ralph2file)")
+        raise typer.Exit(1)
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[red]Error:[/red] No active Ralph2 run found (no database)")
+        raise typer.Exit(1)
+
+    db = Ralph2DB(str(db_path))
+    try:
+        run = db.get_latest_run()
+        if not run:
+            console.print("[red]Error:[/red] No Ralph2 run found")
+            raise typer.Exit(1)
+
+        if run.status not in ["running", "paused"]:
+            console.print(f"[red]Error:[/red] Run {run.id} is {run.status}, cannot add input")
+            raise typer.Exit(1)
+
+        human_input = HumanInput(
+            id=None,
+            run_id=run.id,
+            input_type="comment",
+            content=message,
+            created_at=datetime.now(),
+            consumed_at=None
+        )
+        db.create_human_input(human_input)
+
+        console.print(f"[green]✓[/green] Input added for run {run.id}")
+        console.print(f"  Message: {message}")
+
+    finally:
+        db.close()
+
+
+@app.command()
+def pause():
+    """
+    Pause the current Ralph2 run after the current iteration.
+
+    Ralph2 will check for this signal between iterations and pause gracefully.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[red]Error:[/red] No Ralph2 project found (no Ralph2file)")
+        raise typer.Exit(1)
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[red]Error:[/red] No active Ralph2 run found (no database)")
+        raise typer.Exit(1)
+
+    db = Ralph2DB(str(db_path))
+    try:
+        run = db.get_latest_run()
+        if not run:
+            console.print("[red]Error:[/red] No Ralph2 run found")
+            raise typer.Exit(1)
+
+        if run.status != "running":
+            console.print(f"[yellow]Warning:[/yellow] Run {run.id} is {run.status}, not running")
+            raise typer.Exit(1)
+
+        human_input = HumanInput(
+            id=None,
+            run_id=run.id,
+            input_type="pause",
+            content="pause",
+            created_at=datetime.now(),
+            consumed_at=None
+        )
+        db.create_human_input(human_input)
+
+        console.print(f"[green]✓[/green] Pause signal sent for run {run.id}")
+        console.print("  Ralph2 will pause after the current iteration completes.")
+
+    finally:
+        db.close()
+
+
+@app.command()
+def resume(
+    max_iterations: int = typer.Option(50, help="Maximum additional iterations to run")
+):
+    """
+    Resume a paused Ralph2 run.
+
+    Continues from where the run was paused.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[red]Error:[/red] No Ralph2 project found (no Ralph2file)")
+        raise typer.Exit(1)
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[red]Error:[/red] No Ralph2 database found")
+        raise typer.Exit(1)
+
+    db = Ralph2DB(str(db_path))
+    try:
+        run = db.get_latest_run()
+        if not run:
+            console.print("[red]Error:[/red] No Ralph2 run found")
+            raise typer.Exit(1)
+
+        if run.status != "paused":
+            console.print(f"[yellow]Warning:[/yellow] Run {run.id} is {run.status}, not paused")
+            console.print("  Use 'ralph2 run' to start a new run.")
+            raise typer.Exit(1)
+
+        # Update status to running
+        db.update_run_status(run.id, "running")
+
+        console.print(f"[green]✓[/green] Resuming run {run.id}...")
+
+    finally:
+        db.close()
+
+    # Now run Ralph2
+    try:
+        runner = Ralph2Runner(run.spec_path, ctx)
+        status = asyncio.run(runner.run(max_iterations))
+
+        if status == "completed":
+            console.print("\n[green]✅ Ralph2 completed successfully![/green]")
+        elif status == "stuck":
+            console.print("\n[yellow]⚠️  Ralph2 is stuck and cannot make progress.[/yellow]")
+        elif status == "paused":
+            console.print("\n[blue]⏸️  Ralph2 paused by user.[/blue]")
+        elif status == "aborted":
+            console.print("\n[red]🛑 Ralph2 aborted by user.[/red]")
+        elif status == "max_iterations":
+            console.print(f"\n[yellow]⏱️  Max iterations ({max_iterations}) reached.[/yellow]")
+
+        runner.close()
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠️  Interrupted by user[/yellow]")
+        raise typer.Exit(130)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def abort():
+    """
+    Abort the current Ralph2 run.
+
+    Ralph2 will check for this signal between iterations and abort gracefully.
+    """
+    try:
+        ctx = ProjectContext()
+    except ValueError:
+        console.print("[red]Error:[/red] No Ralph2 project found (no Ralph2file)")
+        raise typer.Exit(1)
+
+    db_path = ctx.db_path
+    if not db_path.exists():
+        console.print("[red]Error:[/red] No active Ralph2 run found (no database)")
+        raise typer.Exit(1)
+
+    db = Ralph2DB(str(db_path))
+    try:
+        run = db.get_latest_run()
+        if not run:
+            console.print("[red]Error:[/red] No Ralph2 run found")
+            raise typer.Exit(1)
+
+        if run.status != "running":
+            console.print(f"[yellow]Warning:[/yellow] Run {run.id} is {run.status}, not running")
+            raise typer.Exit(1)
+
+        human_input = HumanInput(
+            id=None,
+            run_id=run.id,
+            input_type="abort",
+            content="abort",
+            created_at=datetime.now(),
+            consumed_at=None
+        )
+        db.create_human_input(human_input)
+
+        console.print(f"[green]✓[/green] Abort signal sent for run {run.id}")
+        console.print("  Ralph2 will abort after the current iteration completes.")
+
+    finally:
+        db.close()
+
+
+def _format_status(status: str) -> str:
+    """Format status with color."""
+    status_colors = {
+        "running": "[blue]running[/blue]",
+        "completed": "[green]completed[/green]",
+        "stuck": "[yellow]stuck[/yellow]",
+        "paused": "[blue]paused[/blue]",
+        "aborted": "[red]aborted[/red]",
+        "max_iterations": "[yellow]max_iterations[/yellow]"
+    }
+    return status_colors.get(status, status)
+
+
+def main():
+    """Main entry point for the CLI."""
+    app()
+
+
+if __name__ == "__main__":
+    main()

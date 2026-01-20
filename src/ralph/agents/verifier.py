@@ -6,6 +6,8 @@ from typing import Optional
 from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock
 
+from ralph2.constants import VERIFIER_ASSESSMENT_MARKER
+
 
 VERIFIER_SYSTEM_PROMPT = """You are the Verifier. Your ONE job: determine if the spec is satisfied.
 
@@ -42,16 +44,24 @@ Prefer automated evidence over manual checks:
 - For behavioral criteria: only trust tests that use real external systems (not mocked)
 - If no automated evidence → verify manually (read code, run commands, inspect output)
 
-## When to Use STUCK
+## Choosing the Outcome
 
-Use STUCK (not CONTINUE) when:
-- Criteria require external resources that are not available
-- You've confirmed infrastructure works but cannot verify behavior
-- Further iterations cannot produce verification without external input
+**CONTINUE** = There is still implementable work to do
+- Some criteria are not satisfied AND can be implemented
+- Use CONTINUE even if some criteria are unverifiable—as long as there's other work to do
 
-STUCK is the correct response to external dependency blockers.
-CONTINUE would create an infinite loop (no new information will appear).
-DONE would be dishonest (unverified ≠ verified).
+**STUCK** = ALL remaining work requires external blockers
+- Every unsatisfied criterion requires something the executor cannot provide (credentials, human decisions, external access)
+- There is NO implementable work left—only blocked work
+- STUCK means "I literally cannot make progress without external input"
+
+**DONE** = Every criterion is verified satisfied
+- 100% of acceptance criteria are verified (not assumed, not mocked—verified)
+
+**The key distinction:**
+- "Can't verify behavior YET" + "other work remains" = CONTINUE
+- "Can't verify behavior" + "no other work possible" = STUCK
+- If the CLI isn't built, the integration test isn't written, or reports aren't being saved—that's implementable work. Use CONTINUE.
 
 ## Output Format
 
@@ -71,9 +81,9 @@ Efficiency Notes: [Insights that would save time in future iterations, or "None"
 ## Rules
 
 - DONE requires 100% of acceptance criteria VERIFIED satisfied
-- Unverifiable criteria block DONE—use STUCK with clear requirements
-- Partial completion = CONTINUE
-- External dependency blockers = STUCK (not CONTINUE)
+- Partial completion = CONTINUE (there's work to do)
+- Unverifiable criteria do NOT automatically mean STUCK—only if there's no other implementable work
+- STUCK requires ALL remaining work to be blocked by external dependencies
 - "Good enough" is not DONE
 - "Looks done" is not DONE—only "is done" counts
 - The spec is the contract. Verify literally.
@@ -98,8 +108,8 @@ def parse_verifier_output(full_text: str) -> dict:
     assessment = None
     efficiency_notes = None
 
-    # Look for VERIFIER_ASSESSMENT in the output
-    assessment_start = full_text.find("VERIFIER_ASSESSMENT:")
+    # Look for VERIFIER_ASSESSMENT in the output using the constant
+    assessment_start = full_text.find(VERIFIER_ASSESSMENT_MARKER)
 
     if assessment_start != -1:
         assessment = full_text[assessment_start:].strip()
@@ -123,8 +133,8 @@ def parse_verifier_output(full_text: str) -> dict:
                 if efficiency_notes == "None":
                     efficiency_notes = None
     else:
-        # Fallback: create an assessment
-        assessment = "VERIFIER_ASSESSMENT:\nOutcome: CONTINUE\nReasoning: Verification incomplete\n"
+        # Fallback: create an assessment using the constant
+        assessment = f"{VERIFIER_ASSESSMENT_MARKER}\nOutcome: CONTINUE\nReasoning: Verification incomplete\n"
 
     return {
         "outcome": outcome,
