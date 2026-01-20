@@ -5,9 +5,10 @@ Transient errors (rate limits, timeouts, connection errors, 5xx) are retried
 with exponential backoff. Fatal errors (invalid API key, 401, 403) halt immediately.
 """
 
+import asyncio
 import random
 import time
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 T = TypeVar("T")
 
@@ -199,6 +200,56 @@ class RetryHandler:
                 # Calculate delay with exponential backoff and jitter
                 delay = self._calculate_delay(attempt)
                 time.sleep(delay)
+
+        # This should never be reached, but satisfy type checker
+        raise MaxRetriesExhaustedError(
+            message=f"Max retries exhausted after {max_attempts} attempts",
+            attempts=max_attempts,
+            last_error=last_error,
+        )
+
+    async def execute_with_retry_async(
+        self,
+        func: Callable[[], Awaitable[T]],
+        max_attempts: int = 3,
+    ) -> T:
+        """Execute async function with exponential backoff retry on transient errors.
+
+        Args:
+            func: The async function to execute.
+            max_attempts: Maximum number of attempts before giving up.
+
+        Returns:
+            The return value of the function if successful.
+
+        Raises:
+            FatalError: If a fatal error occurs (halts immediately).
+            MaxRetriesExhaustedError: If max_attempts are exhausted.
+            Exception: If a fatal exception type is raised (e.g., PermissionError).
+        """
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await func()
+            except Exception as e:
+                last_error = e
+
+                # Check if error is fatal - halt immediately
+                if not is_transient_error(e):
+                    raise
+
+                # Transient error - retry if we have attempts left
+                if attempt >= max_attempts:
+                    raise MaxRetriesExhaustedError(
+                        message=f"Max retries exhausted after {max_attempts} attempts",
+                        attempts=max_attempts,
+                        last_error=last_error,
+                    )
+
+                # Calculate delay with exponential backoff and jitter
+                delay = self._calculate_delay(attempt)
+                await asyncio.sleep(delay)
 
         # This should never be reached, but satisfy type checker
         raise MaxRetriesExhaustedError(
