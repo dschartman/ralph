@@ -336,3 +336,288 @@ class TestActOutput:
         assert output.new_subtasks == []
         assert output.learnings == []
         assert output.commits == []
+
+
+# =============================================================================
+# TestBaseline Model Tests
+# =============================================================================
+
+
+class TestTestBaseline:
+    """Tests for TestBaseline model (captures test pass/fail state)."""
+
+    def test_baseline_creation_with_counts(self):
+        """TestBaseline can be created with passed/failed/total counts."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=10,
+            failed=2,
+            total=12,
+            has_tests=True,
+        )
+        assert baseline.passed == 10
+        assert baseline.failed == 2
+        assert baseline.total == 12
+        assert baseline.has_tests is True
+
+    def test_baseline_no_tests(self):
+        """TestBaseline can represent 'no tests' state."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=0,
+            failed=0,
+            total=0,
+            has_tests=False,
+        )
+        assert baseline.has_tests is False
+        assert baseline.total == 0
+
+    def test_baseline_with_error_message(self):
+        """TestBaseline can include error message when tests fail to run."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=0,
+            failed=0,
+            total=0,
+            has_tests=False,
+            error="pytest not found",
+        )
+        assert baseline.error == "pytest not found"
+
+    def test_baseline_serialization(self):
+        """TestBaseline can be serialized to dict."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=5,
+            failed=1,
+            total=6,
+            has_tests=True,
+        )
+        data = baseline.model_dump()
+        assert data["passed"] == 5
+        assert data["failed"] == 1
+        assert data["total"] == 6
+        assert data["has_tests"] is True
+
+
+# =============================================================================
+# Workspace Setup Tests (Orchestrator Functions)
+# =============================================================================
+
+
+class TestCreateWorkBranch:
+    """Tests for create_work_branch() orchestrator function."""
+
+    def test_creates_branch_with_iteration_pattern(self, git_repo):
+        """WHEN creating work branch THEN uses soda/iteration-N pattern."""
+        from soda.act import create_work_branch
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        branch_name = create_work_branch(client, iteration_num=1)
+
+        assert branch_name == "soda/iteration-1"
+
+    def test_creates_branch_from_current_head(self, git_repo):
+        """WHEN creating work branch THEN creates from current HEAD."""
+        import subprocess
+        from soda.act import create_work_branch
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        branch_name = create_work_branch(client, iteration_num=1)
+
+        # Verify branch was created
+        result = subprocess.run(
+            ["git", "branch", "--list", branch_name],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert branch_name in result.stdout
+
+    def test_creates_branch_from_milestone_branch(self, git_repo):
+        """WHEN milestone_branch provided THEN creates from that branch."""
+        import subprocess
+        from soda.act import create_work_branch
+        from soda.state.git import GitClient
+
+        # Create milestone branch with a different commit
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/milestone"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "milestone.txt").write_text("milestone content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Milestone commit"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        client = GitClient(cwd=str(git_repo))
+        branch_name = create_work_branch(
+            client, iteration_num=1, milestone_branch="feature/milestone"
+        )
+
+        assert branch_name == "soda/iteration-1"
+
+    def test_handles_existing_branch_with_suffix(self, git_repo):
+        """WHEN iteration branch exists THEN adds suffix."""
+        import subprocess
+        from soda.act import create_work_branch
+        from soda.state.git import GitClient
+
+        # Create existing iteration-1 branch
+        subprocess.run(
+            ["git", "branch", "soda/iteration-1"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        client = GitClient(cwd=str(git_repo))
+        branch_name = create_work_branch(client, iteration_num=1)
+
+        assert branch_name == "soda/iteration-1-2"
+
+    def test_checkouts_new_branch(self, git_repo):
+        """WHEN creating work branch THEN checks it out."""
+        from soda.act import create_work_branch
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        branch_name = create_work_branch(client, iteration_num=3)
+
+        # Verify we're now on the new branch
+        current = client.get_current_branch()
+        assert current == branch_name
+
+
+# =============================================================================
+# Test Baseline Capture Tests
+# =============================================================================
+
+
+class TestCaptureTestBaseline:
+    """Tests for capture_test_baseline() orchestrator function."""
+
+    def test_captures_passing_tests(self, tmp_path):
+        """WHEN tests pass THEN baseline shows passed count."""
+        from soda.act import capture_test_baseline
+
+        # Create a minimal project with passing tests
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass1():
+    assert True
+
+def test_pass2():
+    assert True
+"""
+        )
+
+        baseline = capture_test_baseline(cwd=str(tmp_path))
+
+        assert baseline.has_tests is True
+        assert baseline.passed == 2
+        assert baseline.failed == 0
+        assert baseline.total == 2
+
+    def test_captures_failing_tests(self, tmp_path):
+        """WHEN tests fail THEN baseline shows failed count."""
+        from soda.act import capture_test_baseline
+
+        # Create a minimal project with failing tests
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass():
+    assert True
+
+def test_fail():
+    assert False
+"""
+        )
+
+        baseline = capture_test_baseline(cwd=str(tmp_path))
+
+        assert baseline.has_tests is True
+        assert baseline.passed == 1
+        assert baseline.failed == 1
+        assert baseline.total == 2
+
+    def test_no_tests_returns_no_tests_baseline(self, tmp_path):
+        """WHEN no tests exist THEN baseline shows has_tests=False."""
+        from soda.act import capture_test_baseline
+
+        # Empty directory - no tests
+        baseline = capture_test_baseline(cwd=str(tmp_path))
+
+        assert baseline.has_tests is False
+        assert baseline.total == 0
+
+    def test_no_pytest_returns_no_tests_baseline(self, tmp_path, monkeypatch):
+        """WHEN pytest not available THEN baseline shows has_tests=False with error."""
+        import subprocess
+        from soda.act import capture_test_baseline
+
+        # Mock subprocess to simulate pytest not found
+        def mock_run(*args, **kwargs):
+            raise FileNotFoundError("pytest not found")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        baseline = capture_test_baseline(cwd=str(tmp_path))
+
+        assert baseline.has_tests is False
+        assert baseline.error is not None
+
+
+# =============================================================================
+# Git Repo Fixture for Workspace Tests
+# =============================================================================
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a temporary git repository for testing."""
+    import subprocess
+
+    repo_path = tmp_path / "test_repo"
+    repo_path.mkdir()
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo_path,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo_path,
+        capture_output=True,
+        check=True,
+    )
+
+    # Create initial commit so we have a valid HEAD
+    (repo_path / "README.md").write_text("# Test Repo\n")
+    subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=repo_path,
+        capture_output=True,
+        check=True,
+    )
+
+    return repo_path
