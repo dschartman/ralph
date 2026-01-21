@@ -129,9 +129,37 @@ class TestBaseline(BaseModel):
     has_tests: bool = Field(
         default=False, description="Whether the project has test infrastructure"
     )
+    failed_tests: list[str] = Field(
+        default_factory=list,
+        description="Names of tests that failed (for comparison)",
+    )
     error: Optional[str] = Field(
         default=None,
         description="Error message if tests could not be run (e.g., pytest not found)",
+    )
+
+
+# =============================================================================
+# VerifyResult Structure (Task Verification)
+# =============================================================================
+
+
+class VerifyResult(BaseModel):
+    """Result of task verification (comparing test run to baseline).
+
+    After implementing a task, tests are run and compared to the baseline
+    to determine if the implementation introduced regressions.
+    """
+
+    passed: bool = Field(
+        description="Whether all tests passed (no failures at all)"
+    )
+    new_failures: list[str] = Field(
+        default_factory=list,
+        description="Test names that failed but weren't in baseline",
+    )
+    regressions: bool = Field(
+        description="True if new_failures > 0 (new failures introduced)"
     )
 
 
@@ -165,6 +193,52 @@ def create_work_branch(
     return actual_name
 
 
+def _run_pytest(cwd: Optional[str] = None) -> tuple[str, int]:
+    """Run pytest and return output and return code.
+
+    Shared logic for both capture_test_baseline and verify_task.
+
+    Args:
+        cwd: Working directory to run tests in. If None, uses current directory.
+
+    Returns:
+        Tuple of (stdout+stderr combined, return_code)
+
+    Raises:
+        FileNotFoundError: if pytest is not installed
+        subprocess.TimeoutExpired: if tests take longer than 5 minutes
+    """
+    result = subprocess.run(
+        ["pytest", "--tb=no", "-v", "--no-header"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=300,  # 5 minute timeout for test suite
+    )
+    return result.stdout + result.stderr, result.returncode
+
+
+def _parse_test_results(output: str) -> tuple[int, int, list[str]]:
+    """Parse pytest output to extract pass/fail counts and failed test names.
+
+    Args:
+        output: Combined stdout+stderr from pytest
+
+    Returns:
+        Tuple of (passed_count, failed_count, list_of_failed_test_names)
+    """
+    # Count PASSED and FAILED
+    # Match lines like "test_file.py::test_name PASSED" or "FAILED" with percentage
+    passed = len(re.findall(r"\bPASSED\s*\[\s*\d+%\]", output))
+    failed = len(re.findall(r"\bFAILED\s*\[\s*\d+%\]", output))
+
+    # Extract failed test names
+    # Match lines like "test_file.py::test_name FAILED [100%]"
+    failed_tests = re.findall(r"(\S+::\S+)\s+FAILED\s*\[\s*\d+%\]", output)
+
+    return passed, failed, failed_tests
+
+
 def capture_test_baseline(cwd: Optional[str] = None) -> TestBaseline:
     """Capture the test baseline by running the full test suite.
 
@@ -179,32 +253,15 @@ def capture_test_baseline(cwd: Optional[str] = None) -> TestBaseline:
         TestBaseline with pass/fail counts or has_tests=False if no tests
     """
     try:
-        # Run pytest with JSON-like output to capture results
-        # We use --tb=no to minimize output and -q for quiet mode
-        # -v gives us test names which we can count
-        result = subprocess.run(
-            ["pytest", "--tb=no", "-v", "--no-header"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=300,  # 5 minute timeout for test suite
-        )
-
-        # Parse output to count passed/failed tests
-        # pytest -v output format: "test_file.py::test_name PASSED" or "FAILED"
-        stdout = result.stdout + result.stderr
+        output, returncode = _run_pytest(cwd)
 
         # Check for "no tests ran" or similar
-        if "no tests ran" in stdout.lower() or result.returncode == 5:
+        if "no tests ran" in output.lower() or returncode == 5:
             return TestBaseline(
                 passed=0, failed=0, total=0, has_tests=False
             )
 
-        # Count PASSED and FAILED
-        # Match lines like "test_file.py::test_name PASSED" or "FAILED" with percentage
-        # The regex looks for PASSED/FAILED followed by optional percentage bracket
-        passed = len(re.findall(r"\bPASSED\s*\[\s*\d+%\]", stdout))
-        failed = len(re.findall(r"\bFAILED\s*\[\s*\d+%\]", stdout))
+        passed, failed, failed_tests = _parse_test_results(output)
         total = passed + failed
 
         if total == 0:
@@ -218,6 +275,7 @@ def capture_test_baseline(cwd: Optional[str] = None) -> TestBaseline:
             failed=failed,
             total=total,
             has_tests=True,
+            failed_tests=failed_tests,
         )
 
     except FileNotFoundError:
@@ -244,6 +302,84 @@ def capture_test_baseline(cwd: Optional[str] = None) -> TestBaseline:
             total=0,
             has_tests=False,
             error=str(e),
+        )
+
+
+def verify_task(baseline: TestBaseline, cwd: Optional[str] = None) -> VerifyResult:
+    """Verify task by running tests and comparing to baseline.
+
+    Runs the test suite and compares the results against the baseline
+    captured before implementation. New failures (tests that fail now
+    but weren't failing in the baseline) are identified as regressions.
+
+    Args:
+        baseline: TestBaseline captured before implementation started
+        cwd: Working directory to run tests in. If None, uses current directory.
+
+    Returns:
+        VerifyResult with:
+        - passed: True if all tests pass (no failures at all)
+        - new_failures: Test names that failed but weren't in baseline
+        - regressions: True if new_failures > 0
+    """
+    try:
+        output, returncode = _run_pytest(cwd)
+
+        # Check for "no tests ran" or similar - treat as success
+        if "no tests ran" in output.lower() or returncode == 5:
+            return VerifyResult(
+                passed=True,
+                new_failures=[],
+                regressions=False,
+            )
+
+        passed_count, failed_count, current_failed = _parse_test_results(output)
+        total = passed_count + failed_count
+
+        if total == 0:
+            # No tests found - treat as success
+            return VerifyResult(
+                passed=True,
+                new_failures=[],
+                regressions=False,
+            )
+
+        # Find new failures (failed now but not in baseline)
+        baseline_failures_set = set(baseline.failed_tests)
+        new_failures = [
+            test_name for test_name in current_failed
+            if test_name not in baseline_failures_set
+        ]
+
+        # All tests passed if no failures at all
+        all_passed = failed_count == 0
+
+        return VerifyResult(
+            passed=all_passed,
+            new_failures=new_failures,
+            regressions=len(new_failures) > 0,
+        )
+
+    except FileNotFoundError:
+        # pytest not installed - can't verify, treat as success
+        return VerifyResult(
+            passed=True,
+            new_failures=[],
+            regressions=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Test suite timed out - treat as failure with regression
+        return VerifyResult(
+            passed=False,
+            new_failures=["<test suite timed out>"],
+            regressions=True,
+        )
+    except Exception as e:
+        # Unexpected error - treat as failure with regression
+        return VerifyResult(
+            passed=False,
+            new_failures=[f"<error: {e}>"],
+            regressions=True,
         )
 
 

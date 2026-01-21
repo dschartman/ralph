@@ -820,3 +820,275 @@ class TestHasUncommittedChanges:
 
         client = GitClient(cwd=str(git_repo))
         assert client.has_uncommitted_changes() is True
+
+
+# =============================================================================
+# VerifyResult Model Tests
+# =============================================================================
+
+
+class TestVerifyResult:
+    """Tests for VerifyResult model (verification outcome)."""
+
+    def test_verify_result_creation_all_passed(self):
+        """VerifyResult can represent all tests passing."""
+        from soda.act import VerifyResult
+
+        result = VerifyResult(
+            passed=True,
+            new_failures=[],
+            regressions=False,
+        )
+        assert result.passed is True
+        assert result.new_failures == []
+        assert result.regressions is False
+
+    def test_verify_result_with_new_failures(self):
+        """VerifyResult can include new failures not in baseline."""
+        from soda.act import VerifyResult
+
+        result = VerifyResult(
+            passed=False,
+            new_failures=["test_foo.py::test_new_feature", "test_bar.py::test_edge_case"],
+            regressions=True,
+        )
+        assert result.passed is False
+        assert len(result.new_failures) == 2
+        assert result.regressions is True
+
+    def test_verify_result_serialization(self):
+        """VerifyResult can be serialized to dict."""
+        from soda.act import VerifyResult
+
+        result = VerifyResult(
+            passed=False,
+            new_failures=["test_foo.py::test_something"],
+            regressions=True,
+        )
+        data = result.model_dump()
+        assert data["passed"] is False
+        assert data["new_failures"] == ["test_foo.py::test_something"]
+        assert data["regressions"] is True
+
+
+# =============================================================================
+# TestBaseline Extended Tests (with failed_tests)
+# =============================================================================
+
+
+class TestTestBaselineExtended:
+    """Tests for TestBaseline with failed_tests tracking."""
+
+    def test_baseline_with_failed_tests_list(self):
+        """TestBaseline can track specific test names that failed."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=8,
+            failed=2,
+            total=10,
+            has_tests=True,
+            failed_tests=["test_foo.py::test_a", "test_bar.py::test_b"],
+        )
+        assert len(baseline.failed_tests) == 2
+        assert "test_foo.py::test_a" in baseline.failed_tests
+
+    def test_baseline_failed_tests_defaults_empty(self):
+        """TestBaseline defaults to empty failed_tests list."""
+        from soda.act import TestBaseline
+
+        baseline = TestBaseline(
+            passed=5,
+            failed=0,
+            total=5,
+            has_tests=True,
+        )
+        assert baseline.failed_tests == []
+
+
+# =============================================================================
+# verify_task Function Tests
+# =============================================================================
+
+
+class TestVerifyTask:
+    """Tests for verify_task() function."""
+
+    def test_verify_task_all_pass_against_clean_baseline(self, tmp_path):
+        """WHEN all tests pass AND baseline was clean THEN passed=True."""
+        from soda.act import TestBaseline, verify_task
+
+        # Create passing tests
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass1():
+    assert True
+
+def test_pass2():
+    assert True
+"""
+        )
+
+        baseline = TestBaseline(
+            passed=2,
+            failed=0,
+            total=2,
+            has_tests=True,
+            failed_tests=[],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        assert result.passed is True
+        assert result.new_failures == []
+        assert result.regressions is False
+
+    def test_verify_task_detects_new_failures(self, tmp_path):
+        """WHEN tests fail that weren't in baseline THEN regressions=True."""
+        from soda.act import TestBaseline, verify_task
+
+        # Create tests with a new failure
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass():
+    assert True
+
+def test_new_failure():
+    assert False
+"""
+        )
+
+        # Baseline had no failures
+        baseline = TestBaseline(
+            passed=2,
+            failed=0,
+            total=2,
+            has_tests=True,
+            failed_tests=[],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        assert result.passed is False
+        assert result.regressions is True
+        assert len(result.new_failures) == 1
+        assert "test_new_failure" in result.new_failures[0]
+
+    def test_verify_task_ignores_baseline_failures(self, tmp_path):
+        """WHEN test fails that was already in baseline THEN not counted as new."""
+        from soda.act import TestBaseline, verify_task
+
+        # Create tests where one fails (same as baseline)
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass():
+    assert True
+
+def test_known_failure():
+    assert False
+"""
+        )
+
+        # Baseline already had this failure
+        baseline = TestBaseline(
+            passed=1,
+            failed=1,
+            total=2,
+            has_tests=True,
+            failed_tests=["test_example.py::test_known_failure"],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        # No new failures (the existing failure was in baseline)
+        assert result.regressions is False
+        assert result.new_failures == []
+        # But passed is False because tests did fail
+        assert result.passed is False
+
+    def test_verify_task_with_mixed_failures(self, tmp_path):
+        """WHEN some failures are new and some were in baseline THEN only new ones reported."""
+        from soda.act import TestBaseline, verify_task
+
+        # Create tests with both old and new failures
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass():
+    assert True
+
+def test_known_failure():
+    assert False
+
+def test_new_failure():
+    assert False
+"""
+        )
+
+        # Baseline had one failure
+        baseline = TestBaseline(
+            passed=2,
+            failed=1,
+            total=3,
+            has_tests=True,
+            failed_tests=["test_example.py::test_known_failure"],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        # Only the new failure should be reported
+        assert result.passed is False
+        assert result.regressions is True
+        assert len(result.new_failures) == 1
+        assert "test_new_failure" in result.new_failures[0]
+        assert "test_known_failure" not in str(result.new_failures)
+
+    def test_verify_task_with_no_tests_baseline(self, tmp_path):
+        """WHEN baseline has_tests=False THEN verification still works."""
+        from soda.act import TestBaseline, verify_task
+
+        # Create passing tests
+        test_file = tmp_path / "test_example.py"
+        test_file.write_text(
+            """\
+def test_pass():
+    assert True
+"""
+        )
+
+        # Baseline indicated no tests (maybe tests were added)
+        baseline = TestBaseline(
+            passed=0,
+            failed=0,
+            total=0,
+            has_tests=False,
+            failed_tests=[],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        assert result.passed is True
+        assert result.new_failures == []
+        assert result.regressions is False
+
+    def test_verify_task_with_no_tests_now(self, tmp_path):
+        """WHEN no tests exist now THEN verification returns passed=True."""
+        from soda.act import TestBaseline, verify_task
+
+        # Empty directory - no tests
+        baseline = TestBaseline(
+            passed=0,
+            failed=0,
+            total=0,
+            has_tests=False,
+            failed_tests=[],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        assert result.passed is True
+        assert result.new_failures == []
+        assert result.regressions is False
