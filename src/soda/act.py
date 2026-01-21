@@ -245,3 +245,75 @@ def capture_test_baseline(cwd: Optional[str] = None) -> TestBaseline:
             has_tests=False,
             error=str(e),
         )
+
+
+# =============================================================================
+# Commit Functions (Orchestrator)
+# =============================================================================
+
+
+def commit_task_changes(
+    git_client: "GitClient",
+    task_id: str,
+) -> Optional[str]:
+    """Commit changes after task completion with message referencing task ID.
+
+    This function stages all changes (including untracked files) and creates
+    a commit with a message that references the task ID. If there are no
+    changes to commit, returns None without creating a commit.
+
+    Args:
+        git_client: GitClient instance for git operations
+        task_id: The task ID to reference in the commit message
+
+    Returns:
+        The commit hash if a commit was created, None if no changes were made
+    """
+    # Check for uncommitted changes first
+    if not git_client.has_uncommitted_changes():
+        return None
+
+    # Stage all changes (including untracked files)
+    git_client._run_git(["add", "-A"])
+
+    # Create commit with task ID in message
+    commit_message = f"[{task_id}] Task completed"
+    git_client._run_git(["commit", "-m", commit_message])
+
+    # Get the commit hash
+    result = git_client._run_git(["rev-parse", "HEAD"])
+    return result.stdout.strip()
+
+
+def commit_or_stash_uncommitted(
+    git_client: "GitClient",
+    task_id: str,
+) -> dict:
+    """Commit or stash any uncommitted changes at end of task.
+
+    This function ensures no uncommitted changes are left at the end of a
+    task. It commits any changes with a message referencing the task ID.
+
+    Args:
+        git_client: GitClient instance for git operations
+        task_id: The task ID to reference in the commit message
+
+    Returns:
+        A dict with:
+        - "action": "committed", "stashed", or "none"
+        - "commit_hash": The commit hash if committed, None otherwise
+    """
+    # Check for uncommitted changes
+    if not git_client.has_uncommitted_changes():
+        return {"action": "none", "commit_hash": None}
+
+    # Stage all changes and commit
+    git_client._run_git(["add", "-A"])
+    commit_message = f"[{task_id}] Uncommitted changes at task end"
+    git_client._run_git(["commit", "-m", commit_message])
+
+    # Get the commit hash
+    result = git_client._run_git(["rev-parse", "HEAD"])
+    commit_hash = result.stdout.strip()
+
+    return {"action": "committed", "commit_hash": commit_hash}

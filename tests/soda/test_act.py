@@ -621,3 +621,202 @@ def git_repo(tmp_path):
     )
 
     return repo_path
+
+
+# =============================================================================
+# Commit Logic Tests (Orchestrator Functions)
+# =============================================================================
+
+
+class TestCommitTaskChanges:
+    """Tests for commit_task_changes() orchestrator function."""
+
+    def test_commits_changes_with_task_id_in_message(self, git_repo):
+        """WHEN changes exist THEN commits with message referencing task ID."""
+        import subprocess
+        from soda.act import commit_task_changes
+        from soda.state.git import GitClient
+
+        # Create a change
+        (git_repo / "new_file.py").write_text("# new file\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+
+        client = GitClient(cwd=str(git_repo))
+        commit_hash = commit_task_changes(client, task_id="ralph-abc123")
+
+        # Verify commit was created
+        assert commit_hash is not None
+        assert len(commit_hash) > 0
+
+        # Verify commit message contains task ID
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "ralph-abc123" in result.stdout
+
+    def test_skips_commit_when_no_changes(self, git_repo):
+        """WHEN no changes exist THEN returns None without committing."""
+        from soda.act import commit_task_changes
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        commit_hash = commit_task_changes(client, task_id="ralph-xyz789")
+
+        # No commit should be created
+        assert commit_hash is None
+
+    def test_stages_unstaged_changes_before_commit(self, git_repo):
+        """WHEN unstaged changes exist THEN stages and commits them."""
+        import subprocess
+        from soda.act import commit_task_changes
+        from soda.state.git import GitClient
+
+        # Create unstaged changes (not added to git)
+        (git_repo / "unstaged_file.txt").write_text("unstaged content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        commit_hash = commit_task_changes(client, task_id="ralph-def456")
+
+        # Verify commit was created
+        assert commit_hash is not None
+
+        # Verify the file was committed
+        result = subprocess.run(
+            ["git", "diff", "HEAD~1", "--name-only"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "unstaged_file.txt" in result.stdout
+
+    def test_returns_commit_hash(self, git_repo):
+        """WHEN changes committed THEN returns the commit hash."""
+        import subprocess
+        from soda.act import commit_task_changes
+        from soda.state.git import GitClient
+
+        # Create a change
+        (git_repo / "another_file.py").write_text("# content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        commit_hash = commit_task_changes(client, task_id="ralph-ghi789")
+
+        # Verify hash is valid
+        result = subprocess.run(
+            ["git", "rev-parse", commit_hash],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.returncode == 0
+
+
+class TestCommitOrStashUncommitted:
+    """Tests for commit_or_stash_uncommitted() orchestrator function."""
+
+    def test_commits_uncommitted_changes(self, git_repo):
+        """WHEN uncommitted changes exist THEN commits them."""
+        import subprocess
+        from soda.act import commit_or_stash_uncommitted
+        from soda.state.git import GitClient
+
+        # Create uncommitted changes
+        (git_repo / "uncommitted.txt").write_text("uncommitted content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        result = commit_or_stash_uncommitted(client, task_id="ralph-task1")
+
+        # Verify commit was created
+        assert result["action"] == "committed"
+        assert result["commit_hash"] is not None
+
+        # Verify no uncommitted changes remain
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""
+
+    def test_returns_none_when_no_changes(self, git_repo):
+        """WHEN no uncommitted changes THEN returns action='none'."""
+        from soda.act import commit_or_stash_uncommitted
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        result = commit_or_stash_uncommitted(client, task_id="ralph-task2")
+
+        assert result["action"] == "none"
+        assert result["commit_hash"] is None
+
+    def test_commits_with_task_id_in_message(self, git_repo):
+        """WHEN committing uncommitted changes THEN includes task ID in message."""
+        import subprocess
+        from soda.act import commit_or_stash_uncommitted
+        from soda.state.git import GitClient
+
+        # Create uncommitted changes
+        (git_repo / "final_changes.txt").write_text("final content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        commit_or_stash_uncommitted(client, task_id="ralph-task3")
+
+        # Verify commit message
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "ralph-task3" in result.stdout
+
+
+class TestHasUncommittedChanges:
+    """Tests for has_uncommitted_changes() helper function."""
+
+    def test_returns_false_for_clean_repo(self, git_repo):
+        """WHEN no changes exist THEN returns False."""
+        from soda.state.git import GitClient
+
+        client = GitClient(cwd=str(git_repo))
+        assert client.has_uncommitted_changes() is False
+
+    def test_returns_true_for_staged_changes(self, git_repo):
+        """WHEN staged changes exist THEN returns True."""
+        import subprocess
+        from soda.state.git import GitClient
+
+        # Create and stage a file
+        (git_repo / "staged.txt").write_text("staged content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+
+        client = GitClient(cwd=str(git_repo))
+        assert client.has_uncommitted_changes() is True
+
+    def test_returns_true_for_unstaged_changes(self, git_repo):
+        """WHEN unstaged changes exist THEN returns True."""
+        from soda.state.git import GitClient
+
+        # Create an untracked file
+        (git_repo / "untracked.txt").write_text("untracked content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        assert client.has_uncommitted_changes() is True
+
+    def test_returns_true_for_modified_tracked_file(self, git_repo):
+        """WHEN tracked file is modified THEN returns True."""
+        from soda.state.git import GitClient
+
+        # Modify the existing README.md
+        (git_repo / "README.md").write_text("# Modified content\n")
+
+        client = GitClient(cwd=str(git_repo))
+        assert client.has_uncommitted_changes() is True
