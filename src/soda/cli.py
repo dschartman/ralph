@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from soda.project import ProjectContext, find_project_root
+from soda.project import ProjectContext, find_project_root, get_project_db_path
 from soda.runner import (
     BootstrapError,
     MilestoneError,
@@ -107,7 +107,7 @@ def run(
         # Initialize clients
         git_client = GitClient(cwd=working_dir)
         trace_client = TraceClient()
-        db = SodaDB(str(ProjectContext(require_spec=True).db_path))
+        db = SodaDB(str(get_project_db_path(bootstrap_result.project_id)))
 
         # Create new run record
         run_id = str(uuid.uuid4())[:8]
