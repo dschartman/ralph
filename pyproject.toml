@@ -17,7 +17,7 @@ dependencies = [
 [project.scripts]
 ralph = "ralph.cli:main"
 ralph2 = "ralph2.cli:main"
-soda = "soda:hello"
+soda = "soda.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -26,4 +26,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
 ]

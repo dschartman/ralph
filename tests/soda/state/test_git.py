@@ -543,3 +543,132 @@ class TestDeleteBranch:
         # Try to delete - should fail because branch is unmerged
         with pytest.raises(GitError):
             client.delete_branch("feature/unmerged")
+
+
+class TestStageAllChanges:
+    """Tests for GitClient.stage_all_changes()."""
+
+    def test_stages_untracked_files(self, git_repo: Path):
+        """WHEN untracked files exist THEN stages them."""
+        client = GitClient(cwd=str(git_repo))
+
+        # Create an untracked file
+        (git_repo / "new_file.txt").write_text("new content\n")
+
+        client.stage_all_changes()
+
+        # Verify file is staged
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert "new_file.txt" in result.stdout
+
+    def test_stages_modified_files(self, git_repo: Path):
+        """WHEN tracked files are modified THEN stages them."""
+        client = GitClient(cwd=str(git_repo))
+
+        # Modify an existing file
+        (git_repo / "README.md").write_text("# Modified content\n")
+
+        client.stage_all_changes()
+
+        # Verify file is staged
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert "README.md" in result.stdout
+
+
+class TestCreateCommit:
+    """Tests for GitClient.create_commit()."""
+
+    def test_creates_commit_with_message(self, git_repo: Path):
+        """WHEN creating commit THEN uses provided message."""
+        client = GitClient(cwd=str(git_repo))
+
+        # Create and stage a file
+        (git_repo / "commit_test.txt").write_text("test content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+
+        commit_hash = client.create_commit("Test commit message")
+
+        # Verify commit was created
+        assert commit_hash is not None
+        assert len(commit_hash) == 40  # Full SHA
+
+        # Verify commit message
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "Test commit message" in result.stdout
+
+    def test_returns_commit_hash(self, git_repo: Path):
+        """WHEN creating commit THEN returns the commit hash."""
+        client = GitClient(cwd=str(git_repo))
+
+        # Create and stage a file
+        (git_repo / "hash_test.txt").write_text("test content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+
+        commit_hash = client.create_commit("Another commit")
+
+        # Verify hash is valid by looking it up
+        result = subprocess.run(
+            ["git", "rev-parse", commit_hash],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == commit_hash
+
+
+class TestGetHeadCommitHash:
+    """Tests for GitClient.get_head_commit_hash()."""
+
+    def test_returns_current_head_hash(self, git_repo: Path):
+        """WHEN getting HEAD hash THEN returns correct SHA."""
+        client = GitClient(cwd=str(git_repo))
+
+        commit_hash = client.get_head_commit_hash()
+
+        # Verify hash is valid
+        assert len(commit_hash) == 40
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert commit_hash == result.stdout.strip()
+
+    def test_hash_changes_after_commit(self, git_repo: Path):
+        """WHEN new commit is made THEN HEAD hash changes."""
+        client = GitClient(cwd=str(git_repo))
+
+        old_hash = client.get_head_commit_hash()
+
+        # Make a new commit
+        (git_repo / "new_commit.txt").write_text("content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "New commit"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        new_hash = client.get_head_commit_hash()
+
+        assert new_hash != old_hash

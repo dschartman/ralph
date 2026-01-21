@@ -193,6 +193,33 @@ Test description
 
         assert comments == []
 
+    def test_get_task_comments_handles_multiword_sources(self):
+        """get_task_comments handles sources with spaces and hyphens."""
+        client = TraceClient()
+        mock_output = """ID:          ralph-test123
+Title:       Test task
+Status:      open
+Priority:    2
+Project:     test-project
+Created:     2026-01-20T10:00:00Z
+Updated:     2026-01-20T15:00:00Z
+
+Description:
+Test description
+
+Comments:
+  [2026-01-20 10:30:00] orient agent: Analysis complete
+  [2026-01-20 11:00:00] code-reviewer: LGTM
+"""
+        with patch.object(client, "_run_command", return_value=mock_output):
+            comments = client.get_task_comments("ralph-test123")
+
+        assert len(comments) == 2
+        assert comments[0].source == "orient agent"
+        assert comments[0].text == "Analysis complete"
+        assert comments[1].source == "code-reviewer"
+        assert comments[1].text == "LGTM"
+
 
 class TestTraceClientCreateTask:
     """Tests for TraceClient.create_task()."""

@@ -249,3 +249,43 @@ class GitClient:
             GitError: If branch doesn't exist or is not merged
         """
         self._run_git(["branch", "-d", branch_name])
+
+    def stage_all_changes(self) -> None:
+        """Stage all changes including untracked files.
+
+        Equivalent to 'git add -A'.
+
+        Raises:
+            GitError: If staging fails
+        """
+        self._run_git(["add", "-A"])
+
+    def create_commit(self, message: str) -> str:
+        """Create a commit with the given message.
+
+        Commits all staged changes with the provided message and
+        returns the resulting commit hash.
+
+        Args:
+            message: The commit message
+
+        Returns:
+            The commit hash of the new commit
+
+        Raises:
+            GitError: If commit fails (e.g., nothing staged)
+        """
+        self._run_git(["commit", "-m", message])
+        return self.get_head_commit_hash()
+
+    def get_head_commit_hash(self) -> str:
+        """Get the commit hash of HEAD.
+
+        Returns:
+            The full commit hash of the current HEAD
+
+        Raises:
+            GitError: If unable to get HEAD commit hash
+        """
+        result = self._run_git(["rev-parse", "HEAD"])
+        return result.stdout.strip()

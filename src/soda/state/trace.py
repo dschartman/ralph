@@ -379,15 +379,16 @@ class TraceClient:
 
             if in_comments_section:
                 # Match: [timestamp] source: text
+                # Source can contain spaces/hyphens (e.g., "orient agent", "code-reviewer")
                 comment_match = re.match(
-                    r"^\s+\[([^\]]+)\]\s+(\w+):\s+(.+)$",
+                    r"^\s+\[([^\]]+)\]\s+([^:]+):\s+(.+)$",
                     line,
                 )
                 if comment_match:
                     comments.append(
                         Comment(
                             timestamp=comment_match.group(1),
-                            source=comment_match.group(2),
+                            source=comment_match.group(2).strip(),
                             text=comment_match.group(3),
                         )
                     )

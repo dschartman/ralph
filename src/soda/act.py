@@ -16,15 +16,27 @@ ACT outputs:
 - commits: git commit hashes created
 """
 
+import logging
 import re
 import subprocess
 from typing import TYPE_CHECKING, Optional
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from soda.state.git import GitClient
     from soda.state.trace import TraceClient
+
+
+# =============================================================================
+# Commit Message Templates
+# =============================================================================
+
+# These can be customized by modifying these constants or overriding in subclasses
+COMMIT_MSG_TASK_COMPLETED = "[{task_id}] Task completed"
+COMMIT_MSG_UNCOMMITTED_CHANGES = "[{task_id}] Uncommitted changes at task end"
 
 
 # =============================================================================
@@ -361,15 +373,26 @@ def verify_task(baseline: TestBaseline, cwd: Optional[str] = None) -> VerifyResu
             regressions=len(new_failures) > 0,
         )
 
-    except FileNotFoundError:
-        # pytest not installed - can't verify, treat as success
-        return VerifyResult(
-            passed=True,
-            new_failures=[],
-            regressions=False,
-        )
-    except subprocess.TimeoutExpired:
+    except FileNotFoundError as e:
+        # pytest not installed
+        logger.debug(f"Verification failed: {e}")
+        if baseline.has_tests:
+            # Baseline expected tests but we can't run them - treat as regression
+            return VerifyResult(
+                passed=False,
+                new_failures=["<pytest not available - cannot verify expected tests>"],
+                regressions=True,
+            )
+        else:
+            # Baseline also didn't have tests - consistent, not a regression
+            return VerifyResult(
+                passed=True,
+                new_failures=[],
+                regressions=False,
+            )
+    except subprocess.TimeoutExpired as e:
         # Test suite timed out - treat as failure with regression
+        logger.debug(f"Verification failed: {e}")
         return VerifyResult(
             passed=False,
             new_failures=["<test suite timed out>"],
@@ -377,6 +400,7 @@ def verify_task(baseline: TestBaseline, cwd: Optional[str] = None) -> VerifyResu
         )
     except Exception as e:
         # Unexpected error - treat as failure with regression
+        logger.debug(f"Verification failed: {e}")
         return VerifyResult(
             passed=False,
             new_failures=[f"<error: {e}>"],
@@ -387,6 +411,36 @@ def verify_task(baseline: TestBaseline, cwd: Optional[str] = None) -> VerifyResu
 # =============================================================================
 # Commit Functions (Orchestrator)
 # =============================================================================
+
+
+def _commit_all_changes(
+    git_client: "GitClient",
+    message: str,
+) -> Optional[str]:
+    """Stage all changes and commit with the given message.
+
+    Private helper that consolidates the common commit logic:
+    1. Check for uncommitted changes
+    2. Stage all changes (including untracked files)
+    3. Create commit with the provided message
+    4. Return the commit hash
+
+    Args:
+        git_client: GitClient instance for git operations
+        message: The commit message to use
+
+    Returns:
+        The commit hash if a commit was created, None if no changes were made
+    """
+    # Check for uncommitted changes first
+    if not git_client.has_uncommitted_changes():
+        return None
+
+    # Stage all changes (including untracked files)
+    git_client.stage_all_changes()
+
+    # Create commit and return the hash
+    return git_client.create_commit(message)
 
 
 def commit_task_changes(
@@ -406,27 +460,15 @@ def commit_task_changes(
     Returns:
         The commit hash if a commit was created, None if no changes were made
     """
-    # Check for uncommitted changes first
-    if not git_client.has_uncommitted_changes():
-        return None
-
-    # Stage all changes (including untracked files)
-    git_client._run_git(["add", "-A"])
-
-    # Create commit with task ID in message
-    commit_message = f"[{task_id}] Task completed"
-    git_client._run_git(["commit", "-m", commit_message])
-
-    # Get the commit hash
-    result = git_client._run_git(["rev-parse", "HEAD"])
-    return result.stdout.strip()
+    commit_message = COMMIT_MSG_TASK_COMPLETED.format(task_id=task_id)
+    return _commit_all_changes(git_client, commit_message)
 
 
-def commit_or_stash_uncommitted(
+def commit_uncommitted_changes(
     git_client: "GitClient",
     task_id: str,
 ) -> dict:
-    """Commit or stash any uncommitted changes at end of task.
+    """Commit any uncommitted changes at end of task.
 
     This function ensures no uncommitted changes are left at the end of a
     task. It commits any changes with a message referencing the task ID.
@@ -437,23 +479,20 @@ def commit_or_stash_uncommitted(
 
     Returns:
         A dict with:
-        - "action": "committed", "stashed", or "none"
+        - "action": "committed" or "none"
         - "commit_hash": The commit hash if committed, None otherwise
     """
-    # Check for uncommitted changes
-    if not git_client.has_uncommitted_changes():
+    commit_message = COMMIT_MSG_UNCOMMITTED_CHANGES.format(task_id=task_id)
+    commit_hash = _commit_all_changes(git_client, commit_message)
+
+    if commit_hash:
+        return {"action": "committed", "commit_hash": commit_hash}
+    else:
         return {"action": "none", "commit_hash": None}
 
-    # Stage all changes and commit
-    git_client._run_git(["add", "-A"])
-    commit_message = f"[{task_id}] Uncommitted changes at task end"
-    git_client._run_git(["commit", "-m", commit_message])
 
-    # Get the commit hash
-    result = git_client._run_git(["rev-parse", "HEAD"])
-    commit_hash = result.stdout.strip()
-
-    return {"action": "committed", "commit_hash": commit_hash}
+# Backward compatibility alias
+commit_or_stash_uncommitted = commit_uncommitted_changes
 
 
 # =============================================================================

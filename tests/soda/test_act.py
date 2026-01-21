@@ -1093,6 +1093,62 @@ def test_pass():
         assert result.new_failures == []
         assert result.regressions is False
 
+    def test_verify_task_pytest_not_found_with_expected_tests(self, tmp_path, monkeypatch):
+        """WHEN pytest not found AND baseline had tests THEN regression reported."""
+        import subprocess
+        from soda.act import TestBaseline, verify_task
+
+        # Mock subprocess to simulate pytest not found
+        def mock_run(*args, **kwargs):
+            raise FileNotFoundError("pytest not found")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # Baseline indicated tests existed
+        baseline = TestBaseline(
+            passed=5,
+            failed=0,
+            total=5,
+            has_tests=True,
+            failed_tests=[],
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        # Should be a regression - we expected to run tests but can't
+        assert result.passed is False
+        assert result.regressions is True
+        assert len(result.new_failures) == 1
+        assert "pytest not available" in result.new_failures[0]
+
+    def test_verify_task_pytest_not_found_no_expected_tests(self, tmp_path, monkeypatch):
+        """WHEN pytest not found AND baseline had no tests THEN not a regression."""
+        import subprocess
+        from soda.act import TestBaseline, verify_task
+
+        # Mock subprocess to simulate pytest not found
+        def mock_run(*args, **kwargs):
+            raise FileNotFoundError("pytest not found")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # Baseline indicated no tests (e.g., pytest wasn't installed then either)
+        baseline = TestBaseline(
+            passed=0,
+            failed=0,
+            total=0,
+            has_tests=False,
+            failed_tests=[],
+            error="pytest not found",
+        )
+
+        result = verify_task(baseline, cwd=str(tmp_path))
+
+        # Should NOT be a regression - consistent with baseline
+        assert result.passed is True
+        assert result.regressions is False
+        assert result.new_failures == []
+
 
 # =============================================================================
 # Trace Integration Tests (Task Updates)
@@ -1506,3 +1562,762 @@ class TestFinalizeIteration:
         # Should be on milestone branch
         current = client.get_current_branch()
         assert current == milestone_branch
+
+
+# =============================================================================
+# ActContext Model Tests
+# =============================================================================
+
+
+class TestActContext:
+    """Tests for ActContext model (input to act() function)."""
+
+    def test_act_context_creation_with_required_fields(self):
+        """ActContext can be created with all required fields."""
+        from soda.act import ActContext
+
+        ctx = ActContext(
+            iteration_plan_json='{"tasks": [], "approach": "test"}',
+            spec_content="# Test Spec\n\nDo something.",
+            iteration_num=1,
+            milestone_branch="feature/test",
+        )
+        assert ctx.iteration_plan_json == '{"tasks": [], "approach": "test"}'
+        assert ctx.spec_content == "# Test Spec\n\nDo something."
+        assert ctx.iteration_num == 1
+        assert ctx.milestone_branch == "feature/test"
+
+    def test_act_context_with_optional_fields(self):
+        """ActContext can include optional learnings and working_directory."""
+        from soda.act import ActContext
+
+        ctx = ActContext(
+            iteration_plan_json='{"tasks": [], "approach": "test"}',
+            spec_content="# Spec",
+            iteration_num=2,
+            milestone_branch="main",
+            learnings="- Use pytest for testing\n- API is in src/api.py",
+            working_directory="/path/to/project",
+        )
+        assert ctx.learnings == "- Use pytest for testing\n- API is in src/api.py"
+        assert ctx.working_directory == "/path/to/project"
+
+    def test_act_context_defaults(self):
+        """ActContext has sensible defaults for optional fields."""
+        from soda.act import ActContext
+
+        ctx = ActContext(
+            iteration_plan_json='{}',
+            spec_content="spec",
+            iteration_num=1,
+            milestone_branch="main",
+        )
+        assert ctx.learnings == ""
+        assert ctx.working_directory is None
+
+    def test_act_context_serialization(self):
+        """ActContext can be serialized to dict."""
+        from soda.act import ActContext
+
+        ctx = ActContext(
+            iteration_plan_json='{"tasks": []}',
+            spec_content="# Spec",
+            iteration_num=3,
+            milestone_branch="feature/x",
+            learnings="A learning",
+        )
+        data = ctx.model_dump()
+        assert data["iteration_plan_json"] == '{"tasks": []}'
+        assert data["spec_content"] == "# Spec"
+        assert data["iteration_num"] == 3
+        assert data["milestone_branch"] == "feature/x"
+        assert data["learnings"] == "A learning"
+
+    def test_act_context_requires_iteration_plan_json(self):
+        """ActContext requires iteration_plan_json."""
+        from soda.act import ActContext
+
+        with pytest.raises(ValidationError):
+            ActContext(
+                spec_content="spec",
+                iteration_num=1,
+                milestone_branch="main",
+            )
+
+    def test_act_context_requires_spec_content(self):
+        """ActContext requires spec_content."""
+        from soda.act import ActContext
+
+        with pytest.raises(ValidationError):
+            ActContext(
+                iteration_plan_json='{}',
+                iteration_num=1,
+                milestone_branch="main",
+            )
+
+    def test_act_context_requires_iteration_num(self):
+        """ActContext requires iteration_num."""
+        from soda.act import ActContext
+
+        with pytest.raises(ValidationError):
+            ActContext(
+                iteration_plan_json='{}',
+                spec_content="spec",
+                milestone_branch="main",
+            )
+
+    def test_act_context_requires_milestone_branch(self):
+        """ActContext requires milestone_branch."""
+        from soda.act import ActContext
+
+        with pytest.raises(ValidationError):
+            ActContext(
+                iteration_plan_json='{}',
+                spec_content="spec",
+                iteration_num=1,
+            )
+
+
+# =============================================================================
+# TaskExecutionResult Model Tests
+# =============================================================================
+
+
+class TestTaskExecutionResult:
+    """Tests for TaskExecutionResult model (agent output per task)."""
+
+    def test_task_execution_result_completed(self):
+        """TaskExecutionResult can represent completed task."""
+        from soda.act import TaskExecutionResult
+
+        result = TaskExecutionResult(
+            completed=True,
+            progress_notes="Implemented the feature and tests are passing.",
+        )
+        assert result.completed is True
+        assert result.blocked is False
+        assert result.blocker_reason is None
+        assert "Implemented" in result.progress_notes
+
+    def test_task_execution_result_blocked(self):
+        """TaskExecutionResult can represent blocked task with reason."""
+        from soda.act import TaskExecutionResult
+
+        result = TaskExecutionResult(
+            completed=False,
+            blocked=True,
+            blocker_reason="Missing API key for external service",
+            progress_notes="Tried to integrate but need credentials.",
+        )
+        assert result.completed is False
+        assert result.blocked is True
+        assert result.blocker_reason == "Missing API key for external service"
+
+    def test_task_execution_result_with_subtasks(self):
+        """TaskExecutionResult can include subtasks discovered during work."""
+        from soda.act import TaskExecutionResult
+        from soda.orient import NewTask
+
+        subtask = NewTask(
+            title="Handle edge case",
+            description="Add null check for input parameter",
+            priority=1,
+        )
+        result = TaskExecutionResult(
+            completed=True,
+            progress_notes="Done, but found edge case.",
+            subtasks_needed=[subtask],
+        )
+        assert len(result.subtasks_needed) == 1
+        assert result.subtasks_needed[0].title == "Handle edge case"
+
+    def test_task_execution_result_with_learning(self):
+        """TaskExecutionResult can include efficiency learning."""
+        from soda.act import TaskExecutionResult
+
+        result = TaskExecutionResult(
+            completed=True,
+            progress_notes="Completed the task.",
+            learning="The config file is at src/config.yaml, not .env",
+        )
+        assert result.learning == "The config file is at src/config.yaml, not .env"
+
+    def test_task_execution_result_defaults(self):
+        """TaskExecutionResult has sensible defaults."""
+        from soda.act import TaskExecutionResult
+
+        result = TaskExecutionResult(completed=True)
+        assert result.blocked is False
+        assert result.blocker_reason is None
+        assert result.progress_notes == ""
+        assert result.subtasks_needed == []
+        assert result.learning is None
+
+    def test_task_execution_result_serialization(self):
+        """TaskExecutionResult can be serialized to dict."""
+        from soda.act import TaskExecutionResult
+        from soda.orient import NewTask
+
+        result = TaskExecutionResult(
+            completed=False,
+            blocked=True,
+            blocker_reason="Need database access",
+            progress_notes="Investigated the issue",
+            subtasks_needed=[
+                NewTask(title="Get DB creds", description="Request access")
+            ],
+            learning="DB is on port 5433, not 5432",
+        )
+        data = result.model_dump()
+        assert data["completed"] is False
+        assert data["blocked"] is True
+        assert data["blocker_reason"] == "Need database access"
+        assert data["progress_notes"] == "Investigated the issue"
+        assert len(data["subtasks_needed"]) == 1
+        assert data["learning"] == "DB is on port 5433, not 5432"
+
+    def test_task_execution_result_partial_progress(self):
+        """TaskExecutionResult can represent partial progress (not complete, not blocked)."""
+        from soda.act import TaskExecutionResult
+
+        result = TaskExecutionResult(
+            completed=False,
+            blocked=False,
+            progress_notes="Started implementation but ran out of time.",
+        )
+        assert result.completed is False
+        assert result.blocked is False
+
+
+# =============================================================================
+# EXECUTOR_SYSTEM_PROMPT Tests
+# =============================================================================
+
+
+class TestExecutorSystemPrompt:
+    """Tests for EXECUTOR_SYSTEM_PROMPT content."""
+
+    def test_prompt_covers_tdd_cycle(self):
+        """EXECUTOR_SYSTEM_PROMPT covers TDD cycle for code work."""
+        from soda.act import EXECUTOR_SYSTEM_PROMPT
+
+        assert "TDD" in EXECUTOR_SYSTEM_PROMPT
+        assert "test" in EXECUTOR_SYSTEM_PROMPT.lower()
+        # Should mention writing test first
+        assert "failing test" in EXECUTOR_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_non_code_work(self):
+        """EXECUTOR_SYSTEM_PROMPT covers non-code work (docs, config)."""
+        from soda.act import EXECUTOR_SYSTEM_PROMPT
+
+        assert "Non-Code" in EXECUTOR_SYSTEM_PROMPT or "non-code" in EXECUTOR_SYSTEM_PROMPT.lower()
+        # Should mention docs or config
+        assert "docs" in EXECUTOR_SYSTEM_PROMPT.lower() or "config" in EXECUTOR_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_investigation_tasks(self):
+        """EXECUTOR_SYSTEM_PROMPT covers investigation/research tasks."""
+        from soda.act import EXECUTOR_SYSTEM_PROMPT
+
+        assert "Investigation" in EXECUTOR_SYSTEM_PROMPT or "investigation" in EXECUTOR_SYSTEM_PROMPT.lower()
+
+    def test_prompt_documents_output_schema(self):
+        """EXECUTOR_SYSTEM_PROMPT documents the expected output schema."""
+        from soda.act import EXECUTOR_SYSTEM_PROMPT
+
+        # Should document TaskExecutionResult fields
+        assert "completed" in EXECUTOR_SYSTEM_PROMPT
+        assert "blocked" in EXECUTOR_SYSTEM_PROMPT
+        assert "blocker_reason" in EXECUTOR_SYSTEM_PROMPT
+        assert "progress_notes" in EXECUTOR_SYSTEM_PROMPT
+        assert "subtasks_needed" in EXECUTOR_SYSTEM_PROMPT
+        assert "learning" in EXECUTOR_SYSTEM_PROMPT
+
+    def test_prompt_mentions_available_tools(self):
+        """EXECUTOR_SYSTEM_PROMPT mentions available tools."""
+        from soda.act import EXECUTOR_SYSTEM_PROMPT
+
+        assert "Read" in EXECUTOR_SYSTEM_PROMPT
+        assert "Write" in EXECUTOR_SYSTEM_PROMPT
+        assert "Edit" in EXECUTOR_SYSTEM_PROMPT
+        assert "Bash" in EXECUTOR_SYSTEM_PROMPT
+
+    def test_executor_tools_list(self):
+        """EXECUTOR_TOOLS contains expected tools."""
+        from soda.act import EXECUTOR_TOOLS
+
+        assert "Read" in EXECUTOR_TOOLS
+        assert "Write" in EXECUTOR_TOOLS
+        assert "Edit" in EXECUTOR_TOOLS
+        assert "Glob" in EXECUTOR_TOOLS
+        assert "Grep" in EXECUTOR_TOOLS
+        assert "Bash" in EXECUTOR_TOOLS
+
+
+# =============================================================================
+# act() Function Tests (with mocking)
+# =============================================================================
+
+
+class TestActFunction:
+    """Tests for the main act() async function."""
+
+    @pytest.fixture
+    def mock_narrow_agent(self, mocker):
+        """Mock NarrowAgent to return controlled TaskExecutionResult."""
+        from soda.act import TaskExecutionResult
+
+        # Patch at the source module where NarrowAgent is defined
+        mock_class = mocker.patch("soda.agents.narrow.NarrowAgent")
+        mock_instance = mock_class.return_value
+
+        # Default: task completes successfully
+        async def invoke_success(*args, **kwargs):
+            return TaskExecutionResult(
+                completed=True,
+                progress_notes="Task completed successfully",
+            )
+
+        mock_instance.invoke = mocker.AsyncMock(side_effect=invoke_success)
+        return mock_instance
+
+    @pytest.fixture
+    def mock_git_client(self, mocker):
+        """Mock GitClient for git operations."""
+        mock = mocker.MagicMock()
+        mock.create_branch.return_value = "soda/iteration-1"
+        mock.checkout_branch.return_value = None
+        mock.has_uncommitted_changes.return_value = True
+        mock.stage_all_changes.return_value = None
+        mock.create_commit.return_value = "abc123def"
+        mock.get_head_commit_hash.return_value = "abc123def"
+        mock.merge_branch.return_value = True
+        mock.delete_branch.return_value = None
+        return mock
+
+    @pytest.fixture
+    def mock_trace_client(self, mocker):
+        """Mock TraceClient for Trace operations."""
+        mock = mocker.MagicMock()
+        mock.post_comment.return_value = None
+        mock.close_task.return_value = None
+        mock.create_task.return_value = "ralph-subtask123"
+        return mock
+
+    @pytest.fixture
+    def act_context(self):
+        """Create a standard ActContext for testing."""
+        from soda.act import ActContext
+
+        iteration_plan = {
+            "intent": "Add input validation to the API",
+            "approach": "Implement the feature using TDD",
+            "tasks": [
+                {
+                    "task_id": "ralph-task1",
+                    "title": "Add validation",
+                    "rationale": "Needed for input safety",
+                }
+            ],
+        }
+        import json
+
+        return ActContext(
+            iteration_plan_json=json.dumps(iteration_plan),
+            spec_content="# Test Spec\n\nImplement feature X.",
+            iteration_num=1,
+            milestone_branch="main",
+            learnings="Use pytest for tests",
+        )
+
+    @pytest.mark.asyncio
+    async def test_act_creates_work_branch(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN act() runs THEN creates work branch for iteration."""
+        from soda.act import act
+
+        # Mock capture_test_baseline
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        # Mock verify_task
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        await act(act_context, mock_git_client, mock_trace_client)
+
+        mock_git_client.create_branch.assert_called_once()
+        mock_git_client.checkout_branch.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_act_captures_test_baseline(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN act() runs THEN captures test baseline before work."""
+        from soda.act import act
+
+        mock_capture = mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        await act(act_context, mock_git_client, mock_trace_client)
+
+        mock_capture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_act_returns_completed_tasks(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN task completes successfully THEN included in tasks_completed."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        assert "ralph-task1" in result.tasks_completed
+
+    @pytest.mark.asyncio
+    async def test_act_handles_blocked_task(
+        self, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN agent returns blocked=True THEN task added to tasks_blocked."""
+        from soda.act import act, TaskExecutionResult
+
+        # Mock agent to return blocked result
+        mock_class = mocker.patch("soda.agents.narrow.NarrowAgent")
+        mock_instance = mock_class.return_value
+
+        async def invoke_blocked(*args, **kwargs):
+            return TaskExecutionResult(
+                completed=False,
+                blocked=True,
+                blocker_reason="Missing API credentials",
+                progress_notes="Tried to call API but failed",
+            )
+
+        mock_instance.invoke = mocker.AsyncMock(side_effect=invoke_blocked)
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        assert len(result.tasks_blocked) == 1
+        assert result.tasks_blocked[0].task_id == "ralph-task1"
+        assert "API credentials" in result.tasks_blocked[0].reason
+
+    @pytest.mark.asyncio
+    async def test_act_handles_verification_failure(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN verification shows regressions THEN task marked as blocked."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        # Verification shows new failures
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=False, new_failures=["test_foo.py::test_bar"], regressions=True
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        assert len(result.tasks_blocked) == 1
+        assert "test failure" in result.tasks_blocked[0].reason.lower() or "verification" in result.tasks_blocked[0].reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_act_commits_task_changes(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN task completes THEN commits changes."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        # Should have at least one commit
+        assert len(result.commits) >= 1
+
+    @pytest.mark.asyncio
+    async def test_act_closes_completed_task_in_trace(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN task completes THEN closes task in Trace."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        await act(act_context, mock_git_client, mock_trace_client)
+
+        mock_trace_client.close_task.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_act_posts_progress_comments(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN agent returns progress_notes THEN posts comment to Trace."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        # Should have posted at least one comment
+        mock_trace_client.post_comment.assert_called()
+        assert len(result.task_comments) >= 1
+
+    @pytest.mark.asyncio
+    async def test_act_captures_learnings(
+        self, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN agent returns learning THEN captured in output."""
+        from soda.act import act, TaskExecutionResult
+
+        # Mock agent to return learning
+        mock_class = mocker.patch("soda.agents.narrow.NarrowAgent")
+        mock_instance = mock_class.return_value
+
+        async def invoke_with_learning(*args, **kwargs):
+            return TaskExecutionResult(
+                completed=True,
+                progress_notes="Done",
+                learning="The API endpoint is at /api/v2, not /api/v1",
+            )
+
+        mock_instance.invoke = mocker.AsyncMock(side_effect=invoke_with_learning)
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        assert len(result.learnings) >= 1
+        assert "/api/v2" in result.learnings[0]
+
+    @pytest.mark.asyncio
+    async def test_act_creates_subtasks(
+        self, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN agent returns subtasks_needed THEN creates them in Trace."""
+        from soda.act import act, TaskExecutionResult
+        from soda.orient import NewTask
+
+        # Mock agent to return subtasks
+        mock_class = mocker.patch("soda.agents.narrow.NarrowAgent")
+        mock_instance = mock_class.return_value
+
+        async def invoke_with_subtasks(*args, **kwargs):
+            return TaskExecutionResult(
+                completed=True,
+                progress_notes="Done, but found edge case",
+                subtasks_needed=[
+                    NewTask(
+                        title="Handle null input",
+                        description="Add null check to prevent NPE",
+                        priority=1,
+                    )
+                ],
+            )
+
+        mock_instance.invoke = mocker.AsyncMock(side_effect=invoke_with_subtasks)
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        mock_trace_client.create_task.assert_called()
+        assert len(result.new_subtasks) >= 1
+
+    @pytest.mark.asyncio
+    async def test_act_finalizes_iteration(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN act() completes THEN merges work branch to milestone branch."""
+        from soda.act import act
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        await act(act_context, mock_git_client, mock_trace_client)
+
+        mock_git_client.merge_branch.assert_called()
+        mock_git_client.delete_branch.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_act_handles_agent_invocation_error(
+        self, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN agent.invoke() raises exception THEN task marked as blocked."""
+        from soda.act import act
+
+        # Mock agent to raise exception
+        mock_class = mocker.patch("soda.agents.narrow.NarrowAgent")
+        mock_instance = mock_class.return_value
+        mock_instance.invoke = mocker.AsyncMock(side_effect=Exception("Agent crashed"))
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        assert len(result.tasks_blocked) == 1
+        assert "Agent invocation failed" in result.tasks_blocked[0].reason
+
+    @pytest.mark.asyncio
+    async def test_act_handles_finalize_failure(
+        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
+    ):
+        """WHEN finalize merge fails THEN records learning about conflict."""
+        from soda.act import act
+
+        mock_git_client.merge_branch.return_value = False
+
+        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
+            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
+        ))
+        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
+            passed=True, new_failures=[], regressions=False
+        ))
+
+        result = await act(act_context, mock_git_client, mock_trace_client)
+
+        # Should record merge conflict as learning
+        conflict_learnings = [l for l in result.learnings if "conflict" in l.lower() or "merge" in l.lower()]
+        assert len(conflict_learnings) >= 1
+
+
+# =============================================================================
+# _build_executor_prompt Tests
+# =============================================================================
+
+
+class TestBuildExecutorPrompt:
+    """Tests for _build_executor_prompt helper function."""
+
+    def test_includes_task_id(self):
+        """Prompt includes the task ID."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-abc123",
+            task_title="Test Task",
+            task_rationale="Because reasons",
+            approach="TDD approach",
+            learnings="",
+            spec_content="# Spec",
+        )
+        assert "ralph-abc123" in prompt
+
+    def test_includes_task_title(self):
+        """Prompt includes the task title."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-xyz",
+            task_title="Implement user authentication",
+            task_rationale="Security requirement",
+            approach="Use JWT tokens",
+            learnings="",
+            spec_content="# Spec",
+        )
+        assert "Implement user authentication" in prompt
+
+    def test_includes_approach(self):
+        """Prompt includes the approach from iteration plan."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-xyz",
+            task_title="Test",
+            task_rationale="Reason",
+            approach="Follow TDD: write test first, then implementation",
+            learnings="",
+            spec_content="# Spec",
+        )
+        assert "Follow TDD: write test first, then implementation" in prompt
+
+    def test_includes_learnings_when_provided(self):
+        """Prompt includes learnings when provided."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-xyz",
+            task_title="Test",
+            task_rationale="Reason",
+            approach="Approach",
+            learnings="- Use pytest for testing\n- API is in src/api.py",
+            spec_content="# Spec",
+        )
+        assert "pytest" in prompt
+        assert "src/api.py" in prompt
+
+    def test_excludes_learnings_section_when_empty(self):
+        """Prompt omits learnings section when empty."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-xyz",
+            task_title="Test",
+            task_rationale="Reason",
+            approach="Approach",
+            learnings="",
+            spec_content="# Spec",
+        )
+        # Learnings header should not appear when empty
+        assert "Efficiency Knowledge" not in prompt or "efficiency" not in prompt.lower()
+
+    def test_includes_spec_content(self):
+        """Prompt includes the spec content for context."""
+        from soda.act import _build_executor_prompt
+
+        prompt = _build_executor_prompt(
+            task_id="ralph-xyz",
+            task_title="Test",
+            task_rationale="Reason",
+            approach="Approach",
+            learnings="",
+            spec_content="# My Spec\n\nBuild a widget that does X.",
+        )
+        assert "Build a widget that does X" in prompt

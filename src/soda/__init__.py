@@ -8,6 +8,34 @@ Soda provides patterns for invoking Claude agents:
 
 __version__ = "0.1.0"
 
+# Bootstrap and runner exports
+from soda.runner import (
+    BootstrapError,
+    BootstrapResult,
+    MilestoneContext,
+    MilestoneError,
+    RunContext,
+    RunResult,
+    bootstrap,
+    extract_spec_title,
+    run_loop,
+    setup_milestone,
+)
+
+__all__ = [
+    "BootstrapError",
+    "BootstrapResult",
+    "MilestoneContext",
+    "MilestoneError",
+    "RunContext",
+    "RunResult",
+    "bootstrap",
+    "extract_spec_title",
+    "hello",
+    "run_loop",
+    "setup_milestone",
+]
+
 
 def hello() -> str:
     """Hello from soda - useful for testing imports."""
