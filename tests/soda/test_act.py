@@ -1092,3 +1092,169 @@ def test_pass():
         assert result.passed is True
         assert result.new_failures == []
         assert result.regressions is False
+
+
+# =============================================================================
+# Trace Integration Tests (Task Updates)
+# =============================================================================
+
+
+class TestPostProgressComment:
+    """Tests for post_progress_comment() function."""
+
+    def test_posts_comment_to_trace(self):
+        """WHEN posting progress comment THEN calls TraceClient.post_comment."""
+        from unittest.mock import MagicMock
+        from soda.act import post_progress_comment
+
+        mock_trace = MagicMock()
+
+        result = post_progress_comment(
+            mock_trace,
+            task_id="ralph-abc123",
+            comment="Started implementation"
+        )
+
+        mock_trace.post_comment.assert_called_once_with(
+            "ralph-abc123",
+            "Started implementation",
+            source="executor"
+        )
+
+    def test_returns_task_comment(self):
+        """WHEN posting comment THEN returns TaskComment with task_id and comment."""
+        from unittest.mock import MagicMock
+        from soda.act import post_progress_comment, TaskComment
+
+        mock_trace = MagicMock()
+
+        result = post_progress_comment(
+            mock_trace,
+            task_id="ralph-xyz789",
+            comment="Tests passing"
+        )
+
+        assert isinstance(result, TaskComment)
+        assert result.task_id == "ralph-xyz789"
+        assert result.comment == "Tests passing"
+
+
+class TestCloseTaskTrace:
+    """Tests for close_task_in_trace() Trace integration function."""
+
+    def test_closes_task_in_trace(self):
+        """WHEN closing task THEN calls TraceClient.close_task with message."""
+        from unittest.mock import MagicMock
+        from soda.act import close_task_in_trace
+
+        mock_trace = MagicMock()
+
+        close_task_in_trace(
+            mock_trace,
+            task_id="ralph-abc123",
+            completion_message="Task completed successfully"
+        )
+
+        mock_trace.close_task.assert_called_once_with(
+            "ralph-abc123",
+            message="Task completed successfully"
+        )
+
+    def test_closes_task_without_message(self):
+        """WHEN no message provided THEN closes with default message."""
+        from unittest.mock import MagicMock
+        from soda.act import close_task_in_trace
+
+        mock_trace = MagicMock()
+
+        close_task_in_trace(
+            mock_trace,
+            task_id="ralph-abc123"
+        )
+
+        mock_trace.close_task.assert_called_once()
+        # Should have been called with task_id and message
+        call_args = mock_trace.close_task.call_args
+        assert call_args[0][0] == "ralph-abc123"
+
+
+class TestMarkTaskBlocked:
+    """Tests for mark_task_blocked() function."""
+
+    def test_posts_blocker_comment_to_trace(self):
+        """WHEN marking task blocked THEN posts comment with blocker reason."""
+        from unittest.mock import MagicMock
+        from soda.act import mark_task_blocked
+
+        mock_trace = MagicMock()
+
+        mark_task_blocked(
+            mock_trace,
+            task_id="ralph-abc123",
+            blocker_reason="Missing API key"
+        )
+
+        mock_trace.post_comment.assert_called_once()
+        call_args = mock_trace.post_comment.call_args
+        assert call_args[0][0] == "ralph-abc123"
+        assert "BLOCKED" in call_args[0][1] or "blocked" in call_args[0][1].lower()
+        assert "Missing API key" in call_args[0][1]
+
+    def test_returns_blocked_task(self):
+        """WHEN marking task blocked THEN returns BlockedTask."""
+        from unittest.mock import MagicMock
+        from soda.act import mark_task_blocked, BlockedTask
+
+        mock_trace = MagicMock()
+
+        result = mark_task_blocked(
+            mock_trace,
+            task_id="ralph-xyz789",
+            blocker_reason="External service unavailable"
+        )
+
+        assert isinstance(result, BlockedTask)
+        assert result.task_id == "ralph-xyz789"
+        assert result.reason == "External service unavailable"
+
+
+class TestCreateSubtask:
+    """Tests for create_subtask() function."""
+
+    def test_creates_subtask_in_trace(self):
+        """WHEN creating subtask THEN calls TraceClient.create_task with parent."""
+        from unittest.mock import MagicMock
+        from soda.act import create_subtask
+
+        mock_trace = MagicMock()
+        mock_trace.create_task.return_value = "ralph-new123"
+
+        result = create_subtask(
+            mock_trace,
+            parent_id="ralph-parent",
+            title="Handle edge case",
+            description="Add null check for input"
+        )
+
+        mock_trace.create_task.assert_called_once_with(
+            "Handle edge case",
+            "Add null check for input",
+            parent="ralph-parent"
+        )
+
+    def test_returns_new_task_id(self):
+        """WHEN subtask created THEN returns the new task ID."""
+        from unittest.mock import MagicMock
+        from soda.act import create_subtask
+
+        mock_trace = MagicMock()
+        mock_trace.create_task.return_value = "ralph-subtask456"
+
+        result = create_subtask(
+            mock_trace,
+            parent_id="ralph-parent",
+            title="Add validation",
+            description="Validate input parameters"
+        )
+
+        assert result == "ralph-subtask456"

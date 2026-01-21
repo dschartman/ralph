@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from soda.state.git import GitClient
+    from soda.state.trace import TraceClient
 
 
 # =============================================================================
@@ -453,3 +454,98 @@ def commit_or_stash_uncommitted(
     commit_hash = result.stdout.strip()
 
     return {"action": "committed", "commit_hash": commit_hash}
+
+
+# =============================================================================
+# Trace Integration Functions (Task Updates)
+# =============================================================================
+
+
+def post_progress_comment(
+    trace_client: "TraceClient",
+    task_id: str,
+    comment: str,
+) -> TaskComment:
+    """Post a progress comment to a task in Trace.
+
+    This function posts a comment to the specified task and returns a
+    TaskComment object recording what was posted. Comments are posted
+    with source="executor" to identify them as coming from the ACT phase.
+
+    Args:
+        trace_client: TraceClient instance for Trace operations
+        task_id: The ID of the task to comment on (e.g., 'ralph-abc123')
+        comment: The comment text to post
+
+    Returns:
+        TaskComment with the task_id and comment that was posted
+    """
+    trace_client.post_comment(task_id, comment, source="executor")
+    return TaskComment(task_id=task_id, comment=comment)
+
+
+def close_task_in_trace(
+    trace_client: "TraceClient",
+    task_id: str,
+    completion_message: Optional[str] = None,
+) -> None:
+    """Close a task in Trace with an optional completion message.
+
+    This function marks a task as closed in Trace. If a completion message
+    is provided, it will be recorded with the closure. If no message is
+    provided, a default message is used.
+
+    Args:
+        trace_client: TraceClient instance for Trace operations
+        task_id: The ID of the task to close (e.g., 'ralph-abc123')
+        completion_message: Optional message to record with the closure
+    """
+    message = completion_message or "Task completed"
+    trace_client.close_task(task_id, message=message)
+
+
+def mark_task_blocked(
+    trace_client: "TraceClient",
+    task_id: str,
+    blocker_reason: str,
+) -> BlockedTask:
+    """Mark a task as blocked by posting a blocker comment to Trace.
+
+    This function posts a comment indicating the task is blocked with
+    the provided reason. It returns a BlockedTask object for tracking
+    in the ACT output.
+
+    Args:
+        trace_client: TraceClient instance for Trace operations
+        task_id: The ID of the task that is blocked (e.g., 'ralph-abc123')
+        blocker_reason: The reason why the task is blocked
+
+    Returns:
+        BlockedTask with the task_id and reason
+    """
+    blocker_comment = f"BLOCKED: {blocker_reason}"
+    trace_client.post_comment(task_id, blocker_comment, source="executor")
+    return BlockedTask(task_id=task_id, reason=blocker_reason)
+
+
+def create_subtask(
+    trace_client: "TraceClient",
+    parent_id: str,
+    title: str,
+    description: str,
+) -> str:
+    """Create a subtask under a parent task in Trace.
+
+    This function creates a new task as a child of the specified parent task.
+    Subtasks are typically discovered during work on the parent task.
+
+    Args:
+        trace_client: TraceClient instance for Trace operations
+        parent_id: The ID of the parent task (e.g., 'ralph-parent')
+        title: The title of the new subtask
+        description: The description of the new subtask
+
+    Returns:
+        The ID of the newly created subtask
+    """
+    return trace_client.create_task(title, description, parent=parent_id)
