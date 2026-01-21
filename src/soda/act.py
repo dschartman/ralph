@@ -549,3 +549,80 @@ def create_subtask(
         The ID of the newly created subtask
     """
     return trace_client.create_task(title, description, parent=parent_id)
+
+
+# =============================================================================
+# FinalizeResult Structure
+# =============================================================================
+
+
+class FinalizeResult(BaseModel):
+    """Result of finalize_iteration operation.
+
+    Captures the outcome of merging the work branch to the milestone branch
+    and cleaning up afterward.
+    """
+
+    success: bool = Field(
+        description="Whether finalization succeeded (merge complete, branch deleted)"
+    )
+    merged: bool = Field(description="Whether the merge was successful")
+    branch_deleted: bool = Field(description="Whether the work branch was deleted")
+    conflict_reason: Optional[str] = Field(
+        default=None,
+        description="Reason for failure if merge had conflicts",
+    )
+
+
+# =============================================================================
+# Finalize Function (Orchestrator)
+# =============================================================================
+
+
+def finalize_iteration(
+    git_client: "GitClient",
+    work_branch: str,
+    milestone_branch: str,
+) -> FinalizeResult:
+    """Merge work branch to milestone branch and clean up.
+
+    This function finalizes an iteration by:
+    1. Checking out the milestone branch
+    2. Attempting to merge the work branch
+    3. If merge succeeds: deleting the work branch
+    4. If merge fails: preserving the work branch for investigation
+
+    Args:
+        git_client: GitClient instance for git operations
+        work_branch: Name of the work branch to merge (e.g., 'soda/iteration-1')
+        milestone_branch: Name of the milestone branch to merge into
+
+    Returns:
+        FinalizeResult with:
+        - success: True if merge succeeded and branch was deleted
+        - merged: True if merge completed without conflicts
+        - branch_deleted: True if work branch was deleted
+        - conflict_reason: Reason if merge failed (None if successful)
+    """
+    # Attempt to merge work branch into milestone branch
+    # merge_branch() handles checkout of target branch internally
+    merge_succeeded = git_client.merge_branch(work_branch, milestone_branch)
+
+    if not merge_succeeded:
+        # Merge failed (conflict) - preserve work branch for investigation
+        return FinalizeResult(
+            success=False,
+            merged=False,
+            branch_deleted=False,
+            conflict_reason=f"Merge conflict when merging {work_branch} into {milestone_branch}",
+        )
+
+    # Merge succeeded - delete the work branch
+    git_client.delete_branch(work_branch)
+
+    return FinalizeResult(
+        success=True,
+        merged=True,
+        branch_deleted=True,
+        conflict_reason=None,
+    )
