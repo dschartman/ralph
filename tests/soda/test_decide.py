@@ -6,9 +6,14 @@ from pydantic import ValidationError
 from soda.decide import (
     Decision,
     DecisionOutcome,
+    decide,
+)
+from soda.orient import (
+    Confidence,
+    Gap,
+    GapSeverity,
     OrientOutput,
     SpecSatisfied,
-    decide,
 )
 
 
@@ -156,13 +161,14 @@ class TestSpecSatisfied:
 
 
 class TestOrientOutput:
-    """Tests for OrientOutput model (minimal for DECIDE)."""
+    """Tests for OrientOutput model (full schema from orient.py)."""
 
     def test_orient_output_spec_satisfied_true(self):
         """OrientOutput with spec_satisfied=true."""
         output = OrientOutput(
             spec_satisfied=SpecSatisfied.TRUE,
             actionable_work_exists=False,
+            confidence=Confidence.HIGH,
             summary="All criteria met",
         )
         assert output.spec_satisfied == SpecSatisfied.TRUE
@@ -173,18 +179,20 @@ class TestOrientOutput:
         output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=True,
-            gaps=["Missing tests"],
+            confidence=Confidence.HIGH,
+            gaps=[Gap(description="Missing tests", severity=GapSeverity.MAJOR)],
         )
         assert output.spec_satisfied == SpecSatisfied.FALSE
         assert output.actionable_work_exists is True
-        assert "Missing tests" in output.gaps
+        assert output.gaps[0].description == "Missing tests"
 
     def test_orient_output_spec_unverifiable(self):
         """OrientOutput with spec_satisfied=unverifiable."""
         output = OrientOutput(
             spec_satisfied=SpecSatisfied.UNVERIFIABLE,
             actionable_work_exists=False,
-            gaps=["Requires external API"],
+            confidence=Confidence.LOW,
+            gaps=[Gap(description="Requires external API", severity=GapSeverity.CRITICAL)],
         )
         assert output.spec_satisfied == SpecSatisfied.UNVERIFIABLE
         assert output.actionable_work_exists is False
@@ -194,6 +202,7 @@ class TestOrientOutput:
         output = OrientOutput(
             spec_satisfied="true",
             actionable_work_exists=False,
+            confidence=Confidence.HIGH,
             summary="Done",
         )
         assert output.spec_satisfied == SpecSatisfied.TRUE
@@ -203,7 +212,8 @@ class TestOrientOutput:
         output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=True,
-            gaps=["Gap 1"],
+            confidence=Confidence.MEDIUM,
+            gaps=[Gap(description="Gap 1", severity=GapSeverity.MINOR)],
         )
         data = output.model_dump(mode="json")
         assert data["spec_satisfied"] == "false"
@@ -226,6 +236,7 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.TRUE,
             actionable_work_exists=False,
+            confidence=Confidence.HIGH,
             summary="All acceptance criteria verified",
         )
         decision = decide(orient_output)
@@ -237,6 +248,7 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.TRUE,
             actionable_work_exists=True,
+            confidence=Confidence.HIGH,
             summary="Complete despite remaining work",
         )
         decision = decide(orient_output)
@@ -247,7 +259,8 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=True,
-            gaps=["Missing implementation"],
+            confidence=Confidence.HIGH,
+            gaps=[Gap(description="Missing implementation", severity=GapSeverity.MAJOR)],
         )
         decision = decide(orient_output)
         assert decision.outcome == DecisionOutcome.CONTINUE
@@ -257,7 +270,8 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=False,
-            gaps=["All tasks blocked"],
+            confidence=Confidence.HIGH,
+            gaps=[Gap(description="All tasks blocked", severity=GapSeverity.CRITICAL)],
         )
         decision = decide(orient_output)
         assert decision.outcome == DecisionOutcome.STUCK
@@ -269,7 +283,8 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.UNVERIFIABLE,
             actionable_work_exists=False,
-            gaps=["Requires external API key"],
+            confidence=Confidence.LOW,
+            gaps=[Gap(description="Requires external API key", severity=GapSeverity.CRITICAL)],
         )
         decision = decide(orient_output)
         assert decision.outcome == DecisionOutcome.STUCK
@@ -280,7 +295,8 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.UNVERIFIABLE,
             actionable_work_exists=True,
-            gaps=["Requires external verification"],
+            confidence=Confidence.MEDIUM,
+            gaps=[Gap(description="Requires external verification", severity=GapSeverity.MAJOR)],
         )
         decision = decide(orient_output)
         assert decision.outcome == DecisionOutcome.CONTINUE
@@ -290,7 +306,11 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=False,
-            gaps=["Gap A: Missing dependency", "Gap B: Blocked by external"],
+            confidence=Confidence.HIGH,
+            gaps=[
+                Gap(description="Gap A: Missing dependency", severity=GapSeverity.CRITICAL),
+                Gap(description="Gap B: Blocked by external", severity=GapSeverity.MAJOR),
+            ],
         )
         decision = decide(orient_output)
         assert decision.outcome == DecisionOutcome.STUCK
@@ -303,6 +323,7 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.TRUE,
             actionable_work_exists=False,
+            confidence=Confidence.HIGH,
             summary=summary_text,
         )
         decision = decide(orient_output)
@@ -314,7 +335,8 @@ class TestDecideFunction:
         orient_output = OrientOutput(
             spec_satisfied=SpecSatisfied.FALSE,
             actionable_work_exists=True,
-            gaps=["Test gap"],
+            confidence=Confidence.HIGH,
+            gaps=[Gap(description="Test gap", severity=GapSeverity.MINOR)],
         )
         decision1 = decide(orient_output)
         decision2 = decide(orient_output)

@@ -18,6 +18,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+# Import ORIENT types - OrientOutput is the canonical definition
+from soda.orient import Gap, OrientOutput, SpecSatisfied
+
 
 class DecisionOutcome(str, Enum):
     """Possible outcomes from the DECIDE phase.
@@ -30,43 +33,6 @@ class DecisionOutcome(str, Enum):
     DONE = "DONE"
     STUCK = "STUCK"
     CONTINUE = "CONTINUE"
-
-
-class SpecSatisfied(str, Enum):
-    """Possible values for spec_satisfied in ORIENT output.
-
-    TRUE: All acceptance criteria are satisfied
-    FALSE: Some acceptance criteria are not satisfied
-    UNVERIFIABLE: Cannot verify criteria (requires external resources)
-    """
-
-    TRUE = "true"
-    FALSE = "false"
-    UNVERIFIABLE = "unverifiable"
-
-
-class OrientOutput(BaseModel):
-    """Minimal ORIENT output structure needed for DECIDE routing.
-
-    This represents the subset of ORIENT's output that DECIDE needs
-    to make routing decisions. The full ORIENT output may include
-    additional fields (task_updates, new_tasks, iteration_plan, etc.).
-    """
-
-    spec_satisfied: SpecSatisfied = Field(
-        description="Whether spec is satisfied: true, false, or unverifiable"
-    )
-    actionable_work_exists: bool = Field(
-        description="Whether there is actionable work to do"
-    )
-    gaps: list[str] = Field(
-        default_factory=list,
-        description="Identified gaps (used for STUCK reason)",
-    )
-    summary: Optional[str] = Field(
-        default=None,
-        description="Final assessment summary (used for DONE)",
-    )
 
 
 class Decision(BaseModel):
@@ -132,9 +98,9 @@ def decide(orient_output: OrientOutput) -> Decision:
         return Decision(outcome=DecisionOutcome.CONTINUE)
     else:
         # Rules 3 and 4: no actionable work → STUCK
-        # Build reason from gaps
+        # Build reason from gaps (extract descriptions from Gap objects)
         if orient_output.gaps:
-            reason = "; ".join(orient_output.gaps)
+            reason = "; ".join(gap.description for gap in orient_output.gaps)
         else:
             reason = "No actionable work exists and spec is not satisfied"
         return Decision(

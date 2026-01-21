@@ -19,14 +19,25 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-# Import SpecSatisfied from decide.py to avoid duplication
-from soda.decide import SpecSatisfied
 from soda.agents.narrow import NarrowAgent
 
 
 # =============================================================================
 # Enums
 # =============================================================================
+
+
+class SpecSatisfied(str, Enum):
+    """Possible values for spec_satisfied in ORIENT output.
+
+    TRUE: All acceptance criteria are satisfied
+    FALSE: Some acceptance criteria are not satisfied
+    UNVERIFIABLE: Cannot verify criteria (requires external resources)
+    """
+
+    TRUE = "true"
+    FALSE = "false"
+    UNVERIFIABLE = "unverifiable"
 
 
 class Confidence(str, Enum):
