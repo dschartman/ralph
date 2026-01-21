@@ -831,6 +831,17 @@ Your output must be valid TaskExecutionResult JSON:
 
 If `blocked` is true, `blocker_reason` is required.
 If `completed` is false but not blocked, explain why in `progress_notes`.
+
+---
+
+## CRITICAL: Output Format
+
+Your FINAL response must be ONLY the TaskExecutionResult JSON object. Do not include:
+- Explanatory text before or after the JSON
+- Markdown code fences (no ```json)
+- Commentary about what you're doing
+
+After completing your work, output ONLY the raw JSON object.
 """
 
 

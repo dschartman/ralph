@@ -605,6 +605,17 @@ Set confidence based on your verification certainty:
 
 7. **Complete within token budget** — Be efficient. Don't exhaustively read
    every file. Use Glob/Grep to find relevant code, then Read targeted files.
+
+---
+
+## CRITICAL: Output Format
+
+Your FINAL response must be ONLY the OrientOutput JSON object. Do not include:
+- Explanatory text before or after the JSON
+- Markdown code fences (no ```json)
+- Commentary about what you're doing
+
+After using tools to verify claims and assess the spec, output ONLY the raw JSON object.
 """
 
 
