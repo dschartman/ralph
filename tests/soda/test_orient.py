@@ -1,5 +1,6 @@
-"""Tests for ORIENT data structures."""
+"""Tests for ORIENT data structures and orient() function."""
 
+from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import ValidationError
 
@@ -10,12 +11,16 @@ from soda.orient import (
     IterationPlan,
     Learning,
     NewTask,
+    OrientContext,
     OrientOutput,
     PlannedTask,
     SpecSatisfied,
     TaskUpdate,
     TaskUpdateType,
+    orient,
+    ORIENT_SYSTEM_PROMPT,
 )
+from soda.sense import Claims, CodeStateClaims, WorkStateClaims, ProjectStateClaims
 
 
 # =============================================================================
@@ -745,3 +750,333 @@ class TestOrientOutput:
                 actionable_work_exists=True,
                 confidence="invalid",
             )
+
+
+# =============================================================================
+# OrientContext Model Tests
+# =============================================================================
+
+
+class TestOrientContext:
+    """Tests for OrientContext model."""
+
+    def test_orient_context_creation(self):
+        """OrientContext can be created with required fields."""
+        from datetime import datetime
+
+        claims = Claims(
+            timestamp=datetime.now(),
+            iteration_number=1,
+            code_state=CodeStateClaims(),
+            work_state=WorkStateClaims(),
+            project_state=ProjectStateClaims(iteration_number=1),
+        )
+        ctx = OrientContext(
+            claims=claims,
+            spec="Test spec content",
+            iteration_history=[],
+        )
+        assert ctx.claims == claims
+        assert ctx.spec == "Test spec content"
+        assert ctx.iteration_history == []
+
+    def test_orient_context_with_iteration_history(self):
+        """OrientContext can include iteration history."""
+        from datetime import datetime
+
+        claims = Claims(
+            timestamp=datetime.now(),
+            iteration_number=3,
+            code_state=CodeStateClaims(),
+            work_state=WorkStateClaims(),
+            project_state=ProjectStateClaims(iteration_number=3),
+        )
+        history = [
+            {"number": 1, "intent": "Setup project", "outcome": "CONTINUE"},
+            {"number": 2, "intent": "Implement feature X", "outcome": "CONTINUE"},
+        ]
+        ctx = OrientContext(
+            claims=claims,
+            spec="Test spec",
+            iteration_history=history,
+        )
+        assert len(ctx.iteration_history) == 2
+        assert ctx.iteration_history[0]["intent"] == "Setup project"
+
+    def test_orient_context_with_root_work_item(self):
+        """OrientContext can include root work item ID."""
+        from datetime import datetime
+
+        claims = Claims(
+            timestamp=datetime.now(),
+            iteration_number=1,
+            code_state=CodeStateClaims(),
+            work_state=WorkStateClaims(),
+            project_state=ProjectStateClaims(iteration_number=1),
+        )
+        ctx = OrientContext(
+            claims=claims,
+            spec="Test spec",
+            iteration_history=[],
+            root_work_item_id="ralph-abc123",
+        )
+        assert ctx.root_work_item_id == "ralph-abc123"
+
+    def test_orient_context_json_serializable(self):
+        """OrientContext can be serialized to JSON."""
+        from datetime import datetime
+
+        claims = Claims(
+            timestamp=datetime.now(),
+            iteration_number=1,
+            code_state=CodeStateClaims(),
+            work_state=WorkStateClaims(),
+            project_state=ProjectStateClaims(iteration_number=1),
+        )
+        ctx = OrientContext(
+            claims=claims,
+            spec="Test spec",
+            iteration_history=[],
+        )
+        data = ctx.model_dump(mode="json")
+        assert data["spec"] == "Test spec"
+        assert "claims" in data
+
+
+# =============================================================================
+# ORIENT_SYSTEM_PROMPT Tests
+# =============================================================================
+
+
+class TestOrientSystemPrompt:
+    """Tests for ORIENT_SYSTEM_PROMPT."""
+
+    def test_orient_system_prompt_exists(self):
+        """ORIENT_SYSTEM_PROMPT is defined."""
+        assert ORIENT_SYSTEM_PROMPT is not None
+        assert isinstance(ORIENT_SYSTEM_PROMPT, str)
+
+    def test_orient_system_prompt_includes_verification_guidance(self):
+        """ORIENT_SYSTEM_PROMPT includes guidance for claim verification."""
+        assert "verify" in ORIENT_SYSTEM_PROMPT.lower() or "claim" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_orient_system_prompt_includes_spec_assessment(self):
+        """ORIENT_SYSTEM_PROMPT includes guidance for spec assessment."""
+        assert "spec" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "criterion" in ORIENT_SYSTEM_PROMPT.lower() or "criteria" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_orient_system_prompt_includes_task_management(self):
+        """ORIENT_SYSTEM_PROMPT includes guidance for task management."""
+        assert "task" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_orient_system_prompt_includes_iteration_planning(self):
+        """ORIENT_SYSTEM_PROMPT includes guidance for iteration planning."""
+        assert "plan" in ORIENT_SYSTEM_PROMPT.lower() or "iteration" in ORIENT_SYSTEM_PROMPT.lower()
+
+
+# =============================================================================
+# orient() Function Tests
+# =============================================================================
+
+
+class TestOrientFunction:
+    """Tests for orient() async function."""
+
+    @pytest.fixture
+    def sample_claims(self):
+        """Create sample claims for testing."""
+        from datetime import datetime
+
+        return Claims(
+            timestamp=datetime.now(),
+            iteration_number=1,
+            code_state=CodeStateClaims(
+                branch="feature/test",
+                staged_count=0,
+                unstaged_count=0,
+            ),
+            work_state=WorkStateClaims(
+                open_tasks=[],
+                blocked_tasks=[],
+                closed_tasks=[],
+            ),
+            project_state=ProjectStateClaims(
+                iteration_number=1,
+                first_iteration=True,
+            ),
+        )
+
+    @pytest.fixture
+    def sample_context(self, sample_claims):
+        """Create sample OrientContext for testing."""
+        return OrientContext(
+            claims=sample_claims,
+            spec="# Test Spec\n\n## Acceptance Criteria\n- [ ] Feature X implemented",
+            iteration_history=[],
+        )
+
+    @pytest.fixture
+    def mock_orient_output(self):
+        """Create a mock OrientOutput for testing."""
+        return OrientOutput(
+            spec_satisfied=SpecSatisfied.FALSE,
+            actionable_work_exists=True,
+            confidence=Confidence.HIGH,
+            task_updates=[],
+            new_tasks=[],
+            gaps=[
+                Gap(
+                    description="Feature X not implemented",
+                    severity=GapSeverity.MAJOR,
+                )
+            ],
+            iteration_plan=IterationPlan(
+                intent="Implement Feature X",
+                tasks=[],
+                approach="TDD approach",
+            ),
+            learnings=[],
+        )
+
+    @pytest.mark.asyncio
+    async def test_orient_returns_orient_output(self, sample_context, mock_orient_output):
+        """orient() returns an OrientOutput."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            result = await orient(sample_context)
+
+            assert isinstance(result, OrientOutput)
+
+    @pytest.mark.asyncio
+    async def test_orient_uses_narrow_agent(self, sample_context, mock_orient_output):
+        """orient() uses NarrowAgent for agent invocation."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            mock_agent_class.assert_called_once()
+            mock_agent.invoke.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_orient_passes_system_prompt_to_agent(self, sample_context, mock_orient_output):
+        """orient() passes ORIENT_SYSTEM_PROMPT to NarrowAgent."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            # Check that invoke was called with system_prompt
+            call_kwargs = mock_agent.invoke.call_args.kwargs
+            assert "system_prompt" in call_kwargs
+            assert call_kwargs["system_prompt"] == ORIENT_SYSTEM_PROMPT
+
+    @pytest.mark.asyncio
+    async def test_orient_uses_orient_output_schema(self, sample_context, mock_orient_output):
+        """orient() passes OrientOutput as output_schema to NarrowAgent."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            call_kwargs = mock_agent.invoke.call_args.kwargs
+            assert "output_schema" in call_kwargs
+            assert call_kwargs["output_schema"] == OrientOutput
+
+    @pytest.mark.asyncio
+    async def test_orient_includes_claims_in_prompt(self, sample_context, mock_orient_output):
+        """orient() includes claims information in the prompt."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            call_kwargs = mock_agent.invoke.call_args.kwargs
+            prompt = call_kwargs.get("prompt", "")
+            # The prompt should contain claims information
+            assert "Claims" in prompt or "claims" in prompt or "iteration" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_orient_includes_spec_in_prompt(self, sample_context, mock_orient_output):
+        """orient() includes spec in the prompt."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            call_kwargs = mock_agent.invoke.call_args.kwargs
+            prompt = call_kwargs.get("prompt", "")
+            # The prompt should contain the spec
+            assert "Test Spec" in prompt or "Feature X" in prompt
+
+    @pytest.mark.asyncio
+    async def test_orient_with_allowed_tools(self, sample_context, mock_orient_output):
+        """orient() specifies allowed tools for the agent."""
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=mock_orient_output)
+            mock_agent_class.return_value = mock_agent
+
+            await orient(sample_context)
+
+            call_kwargs = mock_agent.invoke.call_args.kwargs
+            # ORIENT should have read-only tools plus Bash for tests
+            assert "tools" in call_kwargs
+            tools = call_kwargs["tools"]
+            # Should include read-only codebase access
+            assert "Read" in tools or "Glob" in tools or "Grep" in tools
+
+    @pytest.mark.asyncio
+    async def test_orient_spec_satisfied_true(self, sample_context):
+        """orient() can return spec_satisfied=true."""
+        satisfied_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.TRUE,
+            actionable_work_exists=False,
+            confidence=Confidence.HIGH,
+            summary="All acceptance criteria verified",
+        )
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=satisfied_output)
+            mock_agent_class.return_value = mock_agent
+
+            result = await orient(sample_context)
+
+            assert result.spec_satisfied == SpecSatisfied.TRUE
+            assert result.actionable_work_exists is False
+
+    @pytest.mark.asyncio
+    async def test_orient_spec_satisfied_unverifiable(self, sample_context):
+        """orient() can return spec_satisfied=unverifiable."""
+        unverifiable_output = OrientOutput(
+            spec_satisfied=SpecSatisfied.UNVERIFIABLE,
+            actionable_work_exists=False,
+            confidence=Confidence.LOW,
+            gaps=[
+                Gap(
+                    description="Requires external API access",
+                    severity=GapSeverity.CRITICAL,
+                )
+            ],
+        )
+        with patch("soda.orient.NarrowAgent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.invoke = AsyncMock(return_value=unverifiable_output)
+            mock_agent_class.return_value = mock_agent
+
+            result = await orient(sample_context)
+
+            assert result.spec_satisfied == SpecSatisfied.UNVERIFIABLE
