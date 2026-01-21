@@ -329,3 +329,217 @@ class TestCommitInfo:
         assert info.message == "Test commit"
         assert info.author == "Test Author"
         assert info.timestamp == "2024-01-20T12:00:00"
+
+
+class TestMergeBranch:
+    """Tests for GitClient.merge_branch()."""
+
+    def test_merge_branch_success(self, git_repo: Path):
+        """WHEN merging a branch with no conflicts THEN returns True."""
+        client = GitClient(cwd=str(git_repo))
+
+        # Create a feature branch with a new file
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/to-merge"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "feature_file.txt").write_text("feature content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add feature file"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Go back to main/master
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-"],  # Switch back to previous branch
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        main_branch = client.get_current_branch()
+
+        # Merge the feature branch
+        result = client.merge_branch("feature/to-merge", main_branch)
+
+        assert result is True
+        # Verify the file from feature branch is now in main
+        assert (git_repo / "feature_file.txt").exists()
+
+    def test_merge_branch_with_conflict_returns_false(self, git_repo: Path):
+        """WHEN merging a branch with conflicts THEN returns False."""
+        client = GitClient(cwd=str(git_repo))
+        main_branch = client.get_current_branch()
+
+        # Create a feature branch and modify README.md
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/conflict"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "README.md").write_text("# Feature changes\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Feature changes to README"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Go back to main and make conflicting changes
+        subprocess.run(
+            ["git", "checkout", main_branch],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "README.md").write_text("# Main changes\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Main changes to README"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Try to merge - should have conflict
+        result = client.merge_branch("feature/conflict", main_branch)
+
+        assert result is False
+
+        # Clean up the failed merge
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            cwd=git_repo,
+            capture_output=True,
+        )
+
+    def test_merge_branch_checks_out_target_first(self, git_repo: Path):
+        """WHEN merging THEN checks out target branch before merge."""
+        client = GitClient(cwd=str(git_repo))
+        main_branch = client.get_current_branch()
+
+        # Create a feature branch with a new file
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/new-content"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "new_content.txt").write_text("new content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add new content"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Stay on feature branch, but merge into main
+        result = client.merge_branch("feature/new-content", main_branch)
+
+        assert result is True
+        # Should end up on target branch
+        assert client.get_current_branch() == main_branch
+
+
+class TestDeleteBranch:
+    """Tests for GitClient.delete_branch()."""
+
+    def test_delete_merged_branch(self, git_repo: Path):
+        """WHEN deleting a merged branch THEN branch is removed."""
+        client = GitClient(cwd=str(git_repo))
+        main_branch = client.get_current_branch()
+
+        # Create and merge a branch
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/to-delete"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "delete_test.txt").write_text("test content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add file"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Go back to main and merge
+        subprocess.run(
+            ["git", "checkout", main_branch],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "merge", "feature/to-delete"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Delete the branch
+        client.delete_branch("feature/to-delete")
+
+        # Verify branch is deleted
+        result = subprocess.run(
+            ["git", "branch", "--list", "feature/to-delete"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert "feature/to-delete" not in result.stdout
+
+    def test_delete_nonexistent_branch_raises_error(self, git_repo: Path):
+        """WHEN deleting non-existent branch THEN raises GitError."""
+        client = GitClient(cwd=str(git_repo))
+
+        with pytest.raises(GitError):
+            client.delete_branch("nonexistent/branch")
+
+    def test_delete_unmerged_branch_raises_error(self, git_repo: Path):
+        """WHEN deleting unmerged branch with -d THEN raises GitError."""
+        client = GitClient(cwd=str(git_repo))
+        main_branch = client.get_current_branch()
+
+        # Create a branch with changes but don't merge
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/unmerged"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "unmerged.txt").write_text("unmerged content\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Unmerged changes"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Go back to main without merging
+        subprocess.run(
+            ["git", "checkout", main_branch],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        # Try to delete - should fail because branch is unmerged
+        with pytest.raises(GitError):
+            client.delete_branch("feature/unmerged")

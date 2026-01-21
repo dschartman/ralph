@@ -212,3 +212,40 @@ class GitClient:
             if "did not match any file" in str(e) or "pathspec" in str(e):
                 raise GitError(f"Branch '{name}' does not exist") from e
             raise
+
+    def merge_branch(self, source_branch: str, target_branch: str) -> bool:
+        """Merge source branch into target branch.
+
+        Checks out the target branch first, then merges the source branch into it.
+
+        Args:
+            source_branch: Branch to merge from
+            target_branch: Branch to merge into
+
+        Returns:
+            True if merge succeeded, False if there was a conflict
+        """
+        # Checkout target branch first
+        self.checkout_branch(target_branch)
+
+        # Attempt the merge
+        result = self._run_git(["merge", source_branch], check=False)
+
+        if result.returncode != 0:
+            # Merge failed (likely conflict)
+            return False
+
+        return True
+
+    def delete_branch(self, branch_name: str) -> None:
+        """Delete a local branch.
+
+        Uses 'git branch -d' which only deletes merged branches.
+
+        Args:
+            branch_name: Name of the branch to delete
+
+        Raises:
+            GitError: If branch doesn't exist or is not merged
+        """
+        self._run_git(["branch", "-d", branch_name])
