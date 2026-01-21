@@ -29,11 +29,21 @@ from soda.state.git import GitClient
 from soda.state.models import Run, RunStatus
 from soda.state.trace import TraceClient
 
-# Configure logging
+# Configure logging with console output for user feedback
+# Root logger at WARNING to suppress noise from libraries
 logging.basicConfig(
     level=logging.WARNING,
     format="%(levelname)s: %(name)s: %(message)s",
 )
+
+# SODA logger at INFO with a console handler for user-visible progress
+_soda_logger = logging.getLogger("soda")
+_soda_logger.setLevel(logging.INFO)
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+_soda_logger.addHandler(_console_handler)
+
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="SODA - Sense-Orient-Decide-Act Loop Runner")

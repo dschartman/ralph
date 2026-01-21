@@ -474,10 +474,8 @@ async def run_iteration(
     Returns:
         IterationResult with the iteration outcome and phase outputs
     """
-    logger.info(f"Starting iteration {iteration_num}")
-
     # --- SENSE Phase ---
-    logger.debug("Running SENSE phase")
+    logger.info("📡 SENSE: Gathering claims...")
     sense_ctx = SenseContext(
         run_id=ctx.run_id,
         iteration_number=iteration_num,
@@ -487,10 +485,10 @@ async def run_iteration(
         project_root=ctx.working_directory or ".",
     )
     claims = sense(sense_ctx, git_client, trace_client, db)
-    logger.debug(f"SENSE complete: {len(claims.work_state.open_tasks)} open tasks")
+    logger.info(f"   {len(claims.work_state.open_tasks)} open tasks, {len(claims.work_state.closed_tasks)} closed")
 
     # --- ORIENT Phase ---
-    logger.debug("Running ORIENT phase")
+    logger.info("🧭 ORIENT: Verifying claims and planning...")
 
     # Build iteration history for pattern recognition
     iteration_history = _build_iteration_history(db, ctx.run_id, iteration_num)
@@ -502,25 +500,30 @@ async def run_iteration(
         root_work_item_id=ctx.root_work_item_id,
     )
     orient_output = await orient(orient_ctx)
-    logger.debug(
-        f"ORIENT complete: spec_satisfied={orient_output.spec_satisfied.value}, "
-        f"actionable_work={orient_output.actionable_work_exists}"
-    )
+    logger.info(f"   spec_satisfied={orient_output.spec_satisfied.value}, actionable_work={orient_output.actionable_work_exists}")
+    if orient_output.gaps:
+        logger.info(f"   {len(orient_output.gaps)} gap(s) identified")
 
     # --- DECIDE Phase ---
-    logger.debug("Running DECIDE phase")
+    logger.info("🎯 DECIDE: Routing based on ORIENT output...")
     decision = decide(orient_output)
-    logger.info(f"DECIDE outcome: {decision.outcome.value}")
+    logger.info(f"   Decision: {decision.outcome.value}")
 
     # --- ACT Phase (only if CONTINUE) ---
     act_output: Optional[ActOutput] = None
     if decision.outcome == DecisionOutcome.CONTINUE:
-        logger.debug("Running ACT phase")
+        logger.info("⚙️  ACT: Executing iteration plan...")
 
         # ACT requires an iteration plan from ORIENT
         if orient_output.iteration_plan is None:
-            logger.warning("ORIENT returned CONTINUE but no iteration_plan - skipping ACT")
+            logger.warning("   ⚠️  No iteration plan from ORIENT - skipping ACT")
         else:
+            if orient_output.iteration_plan.tasks:
+                tasks_preview = ", ".join(t.task_id for t in orient_output.iteration_plan.tasks[:3])
+                logger.info(f"   Tasks: {tasks_preview}")
+            intent_preview = orient_output.iteration_plan.intent[:80]
+            logger.info(f"   Intent: {intent_preview}...")
+
             # Read current learnings for ACT
             learnings = read_memory(ctx.project_id)
 
@@ -533,10 +536,7 @@ async def run_iteration(
                 working_directory=ctx.working_directory,
             )
             act_output = await act(act_ctx, git_client, trace_client)
-            logger.debug(
-                f"ACT complete: {len(act_output.tasks_completed)} completed, "
-                f"{len(act_output.tasks_blocked)} blocked"
-            )
+            logger.info(f"   ✓ {len(act_output.tasks_completed)} completed, {len(act_output.tasks_blocked)} blocked")
 
     return IterationResult(
         iteration_num=iteration_num,
