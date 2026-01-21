@@ -844,37 +844,6 @@ class TestOrientContext:
 
 
 # =============================================================================
-# ORIENT_SYSTEM_PROMPT Tests
-# =============================================================================
-
-
-class TestOrientSystemPrompt:
-    """Tests for ORIENT_SYSTEM_PROMPT."""
-
-    def test_orient_system_prompt_exists(self):
-        """ORIENT_SYSTEM_PROMPT is defined."""
-        assert ORIENT_SYSTEM_PROMPT is not None
-        assert isinstance(ORIENT_SYSTEM_PROMPT, str)
-
-    def test_orient_system_prompt_includes_verification_guidance(self):
-        """ORIENT_SYSTEM_PROMPT includes guidance for claim verification."""
-        assert "verify" in ORIENT_SYSTEM_PROMPT.lower() or "claim" in ORIENT_SYSTEM_PROMPT.lower()
-
-    def test_orient_system_prompt_includes_spec_assessment(self):
-        """ORIENT_SYSTEM_PROMPT includes guidance for spec assessment."""
-        assert "spec" in ORIENT_SYSTEM_PROMPT.lower()
-        assert "criterion" in ORIENT_SYSTEM_PROMPT.lower() or "criteria" in ORIENT_SYSTEM_PROMPT.lower()
-
-    def test_orient_system_prompt_includes_task_management(self):
-        """ORIENT_SYSTEM_PROMPT includes guidance for task management."""
-        assert "task" in ORIENT_SYSTEM_PROMPT.lower()
-
-    def test_orient_system_prompt_includes_iteration_planning(self):
-        """ORIENT_SYSTEM_PROMPT includes guidance for iteration planning."""
-        assert "plan" in ORIENT_SYSTEM_PROMPT.lower() or "iteration" in ORIENT_SYSTEM_PROMPT.lower()
-
-
-# =============================================================================
 # orient() Function Tests
 # =============================================================================
 
@@ -1080,3 +1049,284 @@ class TestOrientFunction:
             result = await orient(sample_context)
 
             assert result.spec_satisfied == SpecSatisfied.UNVERIFIABLE
+
+
+# =============================================================================
+# ORIENT System Prompt Tests
+# =============================================================================
+
+
+class TestOrientSystemPrompt:
+    """Tests for ORIENT_SYSTEM_PROMPT content requirements from spec."""
+
+    def test_prompt_exists_and_is_string(self):
+        """ORIENT_SYSTEM_PROMPT is defined and is a non-empty string."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert isinstance(ORIENT_SYSTEM_PROMPT, str)
+        assert len(ORIENT_SYSTEM_PROMPT) > 0
+
+    # --- Verify Claims Section ---
+
+    def test_prompt_covers_verify_claims(self):
+        """Prompt covers claim verification responsibility."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert "Verify Claims" in ORIENT_SYSTEM_PROMPT
+        assert "codebase" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "arbiter of truth" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_verify_closed_tasks(self):
+        """Prompt explains verifying closed tasks have actual code implementation."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN claims say a task is closed, THEN ORIENT verifies code actually implements it
+        assert "closed" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "verify" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "implement" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_flag_discrepancy(self):
+        """Prompt explains flagging discrepancy when code doesn't match closed task."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN task marked closed but code doesn't implement it, THEN flag discrepancy and reopen
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "discrepancy" in prompt_lower or "reopen" in prompt_lower
+
+    def test_prompt_covers_verify_blocked_tasks(self):
+        """Prompt explains verifying blocker still exists."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN claims say task blocked, THEN verify blocker still exists
+        assert "blocked" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "blocker" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_unblock_tasks(self):
+        """Prompt explains unblocking tasks when blocker resolved."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN blocker no longer exists, THEN task is unblocked
+        assert "unblock" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "eligible" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_verify_learnings(self):
+        """Prompt explains verifying learnings against reality."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN learnings conflict with observed reality, THEN flag for deprecation
+        assert "learning" in ORIENT_SYSTEM_PROMPT.lower()
+        assert "deprecat" in ORIENT_SYSTEM_PROMPT.lower()
+
+    # --- Assess Spec Satisfaction Section ---
+
+    def test_prompt_covers_spec_assessment(self):
+        """Prompt covers spec satisfaction assessment."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert "Assess" in ORIENT_SYSTEM_PROMPT or "assess" in ORIENT_SYSTEM_PROMPT
+        assert "Spec Satisfaction" in ORIENT_SYSTEM_PROMPT or "spec satisfaction" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_evaluate_each_criterion(self):
+        """Prompt explains evaluating each criterion individually."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN assessing spec, THEN each acceptance criterion is evaluated individually
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "each" in prompt_lower and "criterion" in prompt_lower
+        assert "individual" in prompt_lower
+
+    def test_prompt_covers_spec_satisfied_values(self):
+        """Prompt explains all three spec_satisfied values."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: spec_satisfied can be true, false, or unverifiable
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "spec_satisfied" in prompt_lower or "spec satisfied" in prompt_lower
+        assert "true" in prompt_lower
+        assert "false" in prompt_lower
+        assert "unverifiable" in prompt_lower
+
+    def test_prompt_covers_run_tests(self):
+        """Prompt mentions running tests as verification method."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN assessing criteria, THEN tests are run as one verification method
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "run" in prompt_lower and "test" in prompt_lower
+        assert "pytest" in prompt_lower or "test command" in prompt_lower
+
+    def test_prompt_covers_read_code(self):
+        """Prompt mentions reading code for implementation proof."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN assessing criteria, THEN code is read for implementation proof
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "read" in prompt_lower and "code" in prompt_lower
+
+    def test_prompt_covers_tests_pass_but_implementation_missing(self):
+        """Prompt explains tests passing but implementation missing = not satisfied."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN tests pass but implementation is missing, THEN criterion is not satisfied
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "test" in prompt_lower and "pass" in prompt_lower
+        assert "implementation" in prompt_lower and "missing" in prompt_lower
+        assert "not satisfied" in prompt_lower
+
+    # --- Update Task Breakdown Section ---
+
+    def test_prompt_covers_task_breakdown(self):
+        """Prompt covers task breakdown updates."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert "Task Breakdown" in ORIENT_SYSTEM_PROMPT or "task breakdown" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_close_verified_tasks(self):
+        """Prompt explains closing verified-complete tasks with comment."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN task verified complete, THEN closed in Trace with verification comment
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "close" in prompt_lower and "verified" in prompt_lower
+        assert "comment" in prompt_lower
+
+    def test_prompt_covers_create_gap_tasks(self):
+        """Prompt explains creating tasks for identified gaps."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN gap identified, THEN new task created in Trace
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "gap" in prompt_lower
+        assert "create" in prompt_lower and "task" in prompt_lower
+
+    def test_prompt_covers_subtasks(self):
+        """Prompt explains creating subtasks under parent."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN subtasks are needed, THEN they are created under parent task
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "subtask" in prompt_lower
+        assert "parent" in prompt_lower
+
+    # --- Plan Iteration Section ---
+
+    def test_prompt_covers_plan_iteration(self):
+        """Prompt covers iteration planning."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert "Plan Iteration" in ORIENT_SYSTEM_PROMPT or "iteration plan" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_priority_selection(self):
+        """Prompt explains selecting tasks by priority P0 > P1 > P2."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN planning iteration, THEN tasks selected based on priority (P0 > P1 > P2)
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "priority" in prompt_lower
+        assert "p0" in prompt_lower and "p1" in prompt_lower and "p2" in prompt_lower
+
+    def test_prompt_covers_exclude_blocked(self):
+        """Prompt explains excluding blocked tasks from plan."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN planning iteration, THEN blocked tasks are excluded
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "exclude" in prompt_lower and "blocked" in prompt_lower
+
+    def test_prompt_covers_iteration_intent(self):
+        """Prompt explains defining iteration intent."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN planning iteration, THEN iteration intent is defined
+        assert "intent" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_approach(self):
+        """Prompt explains outlining approach for iteration."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN planning iteration, THEN approach is outlined
+        assert "approach" in ORIENT_SYSTEM_PROMPT.lower()
+
+    # --- Pattern Recognition Section ---
+
+    def test_prompt_covers_pattern_recognition(self):
+        """Prompt covers pattern recognition."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        assert "Pattern Recognition" in ORIENT_SYSTEM_PROMPT or "pattern" in ORIENT_SYSTEM_PROMPT.lower()
+
+    def test_prompt_covers_repeated_criterion_failure(self):
+        """Prompt explains creating investigation task for repeated criterion failure."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN same criterion failed 2+ iterations, THEN investigation task created
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "investigation" in prompt_lower
+        assert "2+" in prompt_lower or "2 iteration" in prompt_lower or "repeated" in prompt_lower
+
+    def test_prompt_covers_repeated_test_failure(self):
+        """Prompt explains creating investigation task for repeated test failure."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN same test failed 2+ iterations, THEN investigation task created
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "test" in prompt_lower and "fail" in prompt_lower
+        assert "investigation" in prompt_lower
+
+    def test_prompt_covers_loop_detection(self):
+        """Prompt explains detecting potential loops."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: WHEN iteration history shows repeated intent with no progress, THEN flag potential loop
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "loop" in prompt_lower
+        assert "repeated" in prompt_lower or "no progress" in prompt_lower
+
+    # --- Output Structure Section ---
+
+    def test_prompt_covers_output_structure(self):
+        """Prompt explains the complete output structure."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: ORIENT output includes all required fields
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "spec_satisfied" in prompt_lower
+        assert "actionable_work_exists" in prompt_lower
+        assert "task_updates" in prompt_lower
+        assert "new_tasks" in prompt_lower
+        assert "gaps" in prompt_lower
+        assert "iteration_plan" in prompt_lower
+        assert "learnings" in prompt_lower
+
+    def test_prompt_covers_confidence_levels(self):
+        """Prompt explains confidence levels."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: Output includes confidence (high, medium, low)
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "confidence" in prompt_lower
+        assert "high" in prompt_lower
+        assert "medium" in prompt_lower
+        assert "low" in prompt_lower
+
+    # --- Tools Section ---
+
+    def test_prompt_covers_available_tools(self):
+        """Prompt lists available tools."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        # Spec: ORIENT agent has Read, Glob, Grep, Bash for tests, plus Trace update capability
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "read" in prompt_lower
+        assert "glob" in prompt_lower
+        assert "grep" in prompt_lower
+        assert "bash" in prompt_lower
+
+    def test_prompt_covers_trace_commands(self):
+        """Prompt includes trace commands."""
+        from soda.orient import ORIENT_SYSTEM_PROMPT
+
+        prompt_lower = ORIENT_SYSTEM_PROMPT.lower()
+        assert "trc close" in prompt_lower
+        assert "trc comment" in prompt_lower
+        assert "trc create" in prompt_lower
