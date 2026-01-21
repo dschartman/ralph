@@ -626,3 +626,442 @@ def finalize_iteration(
         branch_deleted=True,
         conflict_reason=None,
     )
+
+
+# =============================================================================
+# ACT Context Structure
+# =============================================================================
+
+
+class ActContext(BaseModel):
+    """Context required for the ACT phase.
+
+    Contains all the information needed to execute the iteration plan.
+    """
+
+    iteration_plan_json: str = Field(
+        description="JSON-serialized IterationPlan from ORIENT"
+    )
+    learnings: str = Field(
+        default="",
+        description="Accumulated learnings/efficiency knowledge",
+    )
+    spec_content: str = Field(description="The specification content for context")
+    iteration_num: int = Field(description="Current iteration number")
+    milestone_branch: str = Field(description="Branch to merge back to after ACT")
+    working_directory: Optional[str] = Field(
+        default=None,
+        description="Working directory for the project (None = current dir)",
+    )
+
+
+# =============================================================================
+# Task Execution Result (Agent Output per Task)
+# =============================================================================
+
+
+class TaskExecutionResult(BaseModel):
+    """Result from agent executing a single task.
+
+    The executor agent returns this after attempting to complete a task.
+    It indicates whether the task was completed, blocked, or needs subtasks.
+    """
+
+    completed: bool = Field(
+        description="Whether the task was successfully completed"
+    )
+    blocked: bool = Field(
+        default=False,
+        description="Whether the task is blocked and cannot proceed",
+    )
+    blocker_reason: Optional[str] = Field(
+        default=None,
+        description="Reason for blocking (required if blocked=True)",
+    )
+    progress_notes: str = Field(
+        default="",
+        description="Notes on what was done (for Trace comment)",
+    )
+    subtasks_needed: list[NewTask] = Field(
+        default_factory=list,
+        description="Subtasks discovered that need to be created",
+    )
+    learning: Optional[str] = Field(
+        default=None,
+        description="Efficiency knowledge discovered (what you wish you knew before starting)",
+    )
+
+
+# =============================================================================
+# Executor System Prompt
+# =============================================================================
+
+
+EXECUTOR_SYSTEM_PROMPT = """You are the EXECUTOR agent in the SODA loop.
+
+## Your Role
+
+You execute tasks from the iteration plan. Your job is to implement the assigned
+task following TDD principles when appropriate, then report what you accomplished.
+
+---
+
+## Task Execution Flow
+
+### 1. Understand the Task
+- Read the task title and rationale
+- Understand what needs to be done
+- Review any relevant code context
+
+### 2. Execute the Task
+
+**For Code Work (features, bug fixes, refactoring):**
+Follow TDD cycle:
+1. Write a failing test that captures the requirement
+2. Write the minimum code to make the test pass
+3. Refactor if needed while keeping tests green
+4. Run tests to verify
+
+**For Non-Code Work (docs, config, research):**
+Do the work directly without TDD.
+
+**For Investigation Tasks:**
+1. Investigate the issue thoroughly
+2. Document findings in progress_notes
+3. If you find a fix, implement it
+4. If you can't fix it, explain why and what's blocking
+
+### 3. Verify Your Work
+- Run the relevant tests
+- Ensure no regressions were introduced
+- If tests fail, fix them before reporting completion
+
+### 4. Report Results
+Return a TaskExecutionResult with:
+- `completed`: true if task is done, false if blocked
+- `blocked`: true if you cannot proceed
+- `blocker_reason`: why you're blocked (if blocked)
+- `progress_notes`: what you did (for Trace comment)
+- `subtasks_needed`: any subtasks discovered during work
+- `learning`: what you wish you knew before starting
+
+---
+
+## Tools Available
+
+You have full development tools:
+- **Read**: Read files to understand code
+- **Write**: Create new files
+- **Edit**: Modify existing files
+- **Glob**: Find files by pattern
+- **Grep**: Search code for patterns
+- **Bash**: Run commands (tests, builds, etc.)
+
+---
+
+## Key Principles
+
+1. **TDD for code work** - Write test first, then implementation
+2. **Small, focused changes** - Do only what the task requires
+3. **Verify before reporting** - Run tests before marking complete
+4. **Document blockers clearly** - If blocked, explain what's needed
+5. **Capture learnings** - Note efficiency knowledge for future iterations
+
+---
+
+## Output Requirements
+
+Your output must be valid TaskExecutionResult JSON:
+
+```json
+{
+  "completed": true | false,
+  "blocked": false | true,
+  "blocker_reason": null | "reason string",
+  "progress_notes": "Description of what was done",
+  "subtasks_needed": [
+    {
+      "title": "Subtask title",
+      "description": "What needs to be done",
+      "priority": 1
+    }
+  ],
+  "learning": null | "Efficiency knowledge discovered"
+}
+```
+
+If `blocked` is true, `blocker_reason` is required.
+If `completed` is false but not blocked, explain why in `progress_notes`.
+"""
+
+
+# Tools available to the executor agent
+EXECUTOR_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+
+
+# =============================================================================
+# Main ACT Function
+# =============================================================================
+
+
+async def act(
+    ctx: ActContext,
+    git_client: "GitClient",
+    trace_client: "TraceClient",
+) -> ActOutput:
+    """Execute the ACT phase: implement tasks from the iteration plan.
+
+    The ACT phase:
+    1. Creates a work branch for the iteration
+    2. Captures test baseline
+    3. Executes each task in the iteration plan (via agent)
+    4. Verifies each task (runs tests, compares to baseline)
+    5. Commits changes at task boundaries
+    6. Updates Trace with progress/completion/blockers
+    7. Captures learnings
+    8. Finalizes by merging work branch to milestone branch
+
+    Args:
+        ctx: ActContext with iteration plan and configuration
+        git_client: GitClient instance for git operations
+        trace_client: TraceClient instance for Trace operations
+
+    Returns:
+        ActOutput with completed tasks, blocked tasks, comments, subtasks,
+        learnings, and commit hashes
+    """
+    import json
+    from soda.agents.narrow import NarrowAgent
+    from soda.orient import IterationPlan
+
+    # Parse the iteration plan
+    iteration_plan = IterationPlan.model_validate_json(ctx.iteration_plan_json)
+
+    # Initialize output collectors
+    tasks_completed: list[str] = []
+    tasks_blocked: list[BlockedTask] = []
+    task_comments: list[TaskComment] = []
+    new_subtasks: list[NewTask] = []
+    learnings: list[str] = []
+    commits: list[str] = []
+
+    # --- Setup Workspace ---
+    # Create work branch for this iteration
+    work_branch = create_work_branch(
+        git_client,
+        ctx.iteration_num,
+        ctx.milestone_branch,
+    )
+
+    # Capture test baseline before making changes
+    baseline = capture_test_baseline(ctx.working_directory)
+
+    # --- Execute Each Task ---
+    for planned_task in iteration_plan.tasks:
+        task_id = planned_task.task_id
+        task_title = planned_task.title
+        task_rationale = planned_task.rationale
+
+        # Build prompt for the executor agent
+        prompt = _build_executor_prompt(
+            task_id=task_id,
+            task_title=task_title,
+            task_rationale=task_rationale,
+            approach=iteration_plan.approach,
+            learnings=ctx.learnings,
+            spec_content=ctx.spec_content,
+        )
+
+        # Invoke agent to execute the task
+        agent = NarrowAgent()
+        try:
+            result: TaskExecutionResult = await agent.invoke(
+                prompt=prompt,
+                output_schema=TaskExecutionResult,
+                tools=EXECUTOR_TOOLS,
+                system_prompt=EXECUTOR_SYSTEM_PROMPT,
+            )
+        except Exception as e:
+            # Agent invocation failed - mark task as blocked
+            blocked = mark_task_blocked(
+                trace_client, task_id, f"Agent invocation failed: {e}"
+            )
+            tasks_blocked.append(blocked)
+            continue
+
+        # --- Process Agent Result ---
+
+        # Post progress comment to Trace
+        if result.progress_notes:
+            comment = post_progress_comment(
+                trace_client, task_id, result.progress_notes
+            )
+            task_comments.append(comment)
+
+        # Handle subtasks discovered during work
+        for subtask in result.subtasks_needed:
+            subtask_id = create_subtask(
+                trace_client,
+                task_id,
+                subtask.title,
+                subtask.description,
+            )
+            # Record the subtask with its new ID
+            new_subtasks.append(
+                NewTask(
+                    title=subtask.title,
+                    description=subtask.description,
+                    priority=subtask.priority,
+                    parent_id=task_id,
+                )
+            )
+
+        # Capture learning if provided
+        if result.learning:
+            learnings.append(result.learning)
+
+        # Handle blocked tasks
+        if result.blocked:
+            blocked = mark_task_blocked(
+                trace_client,
+                task_id,
+                result.blocker_reason or "Task blocked (no reason provided)",
+            )
+            tasks_blocked.append(blocked)
+            # Still commit any partial work
+            commit_result = commit_or_stash_uncommitted(git_client, task_id)
+            if commit_result["commit_hash"]:
+                commits.append(commit_result["commit_hash"])
+            continue
+
+        # --- Verify Task ---
+        if result.completed:
+            verify_result = verify_task(baseline, ctx.working_directory)
+
+            if verify_result.regressions:
+                # New test failures introduced - mark as blocked
+                failure_msg = f"Verification failed: new test failures: {verify_result.new_failures}"
+                blocked = mark_task_blocked(trace_client, task_id, failure_msg)
+                tasks_blocked.append(blocked)
+                # Commit the broken state for investigation
+                commit_result = commit_or_stash_uncommitted(git_client, task_id)
+                if commit_result["commit_hash"]:
+                    commits.append(commit_result["commit_hash"])
+            else:
+                # Task completed successfully
+                close_task_in_trace(
+                    trace_client,
+                    task_id,
+                    f"Completed: {result.progress_notes[:100] if result.progress_notes else 'Task done'}",
+                )
+                tasks_completed.append(task_id)
+
+                # Commit task changes
+                commit_hash = commit_task_changes(git_client, task_id)
+                if commit_hash:
+                    commits.append(commit_hash)
+        else:
+            # Task not completed but not blocked - partial progress
+            comment = post_progress_comment(
+                trace_client,
+                task_id,
+                f"Partial progress: {result.progress_notes or 'Some work done'}",
+            )
+            task_comments.append(comment)
+            # Commit partial work
+            commit_result = commit_or_stash_uncommitted(git_client, task_id)
+            if commit_result["commit_hash"]:
+                commits.append(commit_result["commit_hash"])
+
+    # --- Finalize ---
+    # Merge work branch back to milestone branch
+    finalize_result = finalize_iteration(
+        git_client,
+        work_branch,
+        ctx.milestone_branch,
+    )
+
+    # If finalize failed, record it as a learning
+    if not finalize_result.success:
+        learnings.append(
+            f"Merge conflict during finalize: {finalize_result.conflict_reason}"
+        )
+
+    return ActOutput(
+        tasks_completed=tasks_completed,
+        tasks_blocked=tasks_blocked,
+        task_comments=task_comments,
+        new_subtasks=new_subtasks,
+        learnings=learnings,
+        commits=commits,
+    )
+
+
+def _build_executor_prompt(
+    task_id: str,
+    task_title: str,
+    task_rationale: str,
+    approach: str,
+    learnings: str,
+    spec_content: str,
+) -> str:
+    """Build the prompt for the executor agent.
+
+    Args:
+        task_id: ID of the task to execute
+        task_title: Title of the task
+        task_rationale: Why this task was selected
+        approach: Overall approach from iteration plan
+        learnings: Accumulated efficiency knowledge
+        spec_content: The specification for context
+
+    Returns:
+        Formatted prompt string for the executor agent
+    """
+    parts = [
+        "# Task Assignment",
+        "",
+        f"**Task ID:** {task_id}",
+        f"**Title:** {task_title}",
+        f"**Rationale:** {task_rationale}",
+        "",
+        "---",
+        "",
+        "# Approach",
+        "",
+        approach,
+        "",
+        "---",
+        "",
+    ]
+
+    if learnings:
+        parts.extend([
+            "# Learnings (Efficiency Knowledge)",
+            "",
+            "Use these to work more efficiently:",
+            "",
+            learnings,
+            "",
+            "---",
+            "",
+        ])
+
+    parts.extend([
+        "# Spec (for context)",
+        "",
+        spec_content,
+        "",
+        "---",
+        "",
+        "# Your Task",
+        "",
+        "1. Understand what needs to be done",
+        "2. Execute the task (follow TDD for code work)",
+        "3. Run tests to verify your work",
+        "4. Report your results",
+        "",
+        "Return a TaskExecutionResult with your findings.",
+    ])
+
+    return "\n".join(parts)
