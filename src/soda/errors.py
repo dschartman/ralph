@@ -95,6 +95,8 @@ def is_transient_error(error: Exception) -> bool:
         - TransientError: Always transient
         - PermissionError: Fatal
         - TimeoutError, ConnectionError: Transient
+        - CancelledError: NOT handled here (propagates immediately)
+        - RuntimeError with "cancel scope": Fatal (SDK bug, don't retry)
         - SodaError with status_code:
             - 429, 5xx: Transient
             - 401, 403: Fatal
@@ -115,6 +117,15 @@ def is_transient_error(error: Exception) -> bool:
     # Python built-in transient errors
     if isinstance(error, (TimeoutError, ConnectionError)):
         return True
+
+    # RuntimeError from anyio cancel scope bug in claude_agent_sdk
+    # These indicate a broken async state - don't retry, it won't help.
+    # The SDK has a known bug (PR #364) where cancel scopes are exited
+    # from a different task. This corrupts async state beyond recovery.
+    if isinstance(error, RuntimeError):
+        error_msg = str(error).lower()
+        if "cancel scope" in error_msg or "different task" in error_msg:
+            return False
 
     # Check status code on SodaError subclasses
     if isinstance(error, SodaError) and error.status_code is not None:
@@ -227,11 +238,17 @@ class RetryHandler:
             MaxRetriesExhaustedError: If max_attempts are exhausted.
             Exception: If a fatal exception type is raised (e.g., PermissionError).
         """
-        last_error: Optional[Exception] = None
+        last_error: Optional[BaseException] = None
 
         for attempt in range(1, max_attempts + 1):
             try:
                 return await func()
+            except asyncio.CancelledError:
+                # CancelledError means the task is being cancelled (user interrupt,
+                # timeout, or anyio cancel scope). Always propagate immediately -
+                # retrying is pointless because the cancel scope will keep cancelling.
+                # SDK cleanup bugs should be handled at the source, not here.
+                raise
             except Exception as e:
                 last_error = e
 
