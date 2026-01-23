@@ -606,16 +606,6 @@ Set confidence based on your verification certainty:
 7. **Complete within token budget** — Be efficient. Don't exhaustively read
    every file. Use Glob/Grep to find relevant code, then Read targeted files.
 
----
-
-## CRITICAL: Output Format
-
-Your FINAL response must be ONLY the OrientOutput JSON object. Do not include:
-- Explanatory text before or after the JSON
-- Markdown code fences (no ```json)
-- Commentary about what you're doing
-
-After using tools to verify claims and assess the spec, output ONLY the raw JSON object.
 """
 
 
@@ -933,40 +923,147 @@ def _build_orient_prompt(ctx: OrientContext) -> str:
     # Add claims section
     prompt_parts.append("# Claims from SENSE")
     prompt_parts.append("")
+
     # Serialize claims to readable format
     if hasattr(ctx.claims, "model_dump"):
         claims_data = ctx.claims.model_dump(mode="json")
-        # Format key claims sections
-        prompt_parts.append("## Code State")
+
+        # =====================================================================
+        # File Structure (navigational context)
+        # =====================================================================
+        file_tree = claims_data.get("file_tree", "")
+        if file_tree:
+            prompt_parts.append("## File Structure")
+            prompt_parts.append("")
+            prompt_parts.append("```")
+            prompt_parts.append(file_tree)
+            prompt_parts.append("```")
+            prompt_parts.append("")
+
+        # =====================================================================
+        # Changes Since Base (git delta with per-file details)
+        # =====================================================================
         code_state = claims_data.get("code_state", {})
-        prompt_parts.append(f"- Branch: {code_state.get('branch', 'unknown')}")
-        prompt_parts.append(f"- Staged changes: {code_state.get('staged_count', 0)}")
-        prompt_parts.append(f"- Unstaged changes: {code_state.get('unstaged_count', 0)}")
-        if code_state.get("commits"):
-            prompt_parts.append(f"- Commits since base: {len(code_state['commits'])}")
-        if code_state.get("files_changed"):
-            prompt_parts.append(f"- Files changed: {len(code_state['files_changed'])}")
+        git_delta = code_state.get("git_delta")
+        if git_delta:
+            prompt_parts.append("## Changes Since Base")
+            prompt_parts.append("")
+
+            # Per-file changes
+            files = git_delta.get("files", [])
+            if files:
+                prompt_parts.append("Files changed:")
+                for f in files:
+                    change_marker = {
+                        "added": "+",
+                        "modified": "M",
+                        "deleted": "-",
+                        "renamed": "R",
+                    }.get(f.get("change_type", "M"), "M")
+                    lines_info = f"(+{f.get('lines_added', 0)}, -{f.get('lines_removed', 0)})"
+                    prompt_parts.append(f"- {change_marker} {f.get('path', 'unknown')} {lines_info}")
+                prompt_parts.append("")
+
+            # Commits
+            commits = git_delta.get("commits", [])
+            if commits:
+                prompt_parts.append("Commits:")
+                for c in commits:
+                    prompt_parts.append(f"- {c.get('hash', '?')[:7]}: {c.get('message', 'no message')}")
+                prompt_parts.append("")
+
+            # Totals
+            total_added = git_delta.get("total_lines_added", 0)
+            total_removed = git_delta.get("total_lines_removed", 0)
+            prompt_parts.append(f"Total: +{total_added} lines, -{total_removed} lines")
+            prompt_parts.append("")
+        else:
+            # Fall back to basic code state info
+            prompt_parts.append("## Code State")
+            prompt_parts.append(f"- Branch: {code_state.get('branch', 'unknown')}")
+            prompt_parts.append(f"- Staged changes: {code_state.get('staged_count', 0)}")
+            prompt_parts.append(f"- Unstaged changes: {code_state.get('unstaged_count', 0)}")
+            if code_state.get("commits"):
+                prompt_parts.append(f"- Commits since base: {len(code_state['commits'])}")
+            if code_state.get("files_changed"):
+                prompt_parts.append(f"- Files changed: {len(code_state['files_changed'])}")
+            prompt_parts.append("")
+
+        # =====================================================================
+        # Work Items (full task data with descriptions)
+        # =====================================================================
+        prompt_parts.append("## Work Items")
         prompt_parts.append("")
 
-        prompt_parts.append("## Work State")
         work_state = claims_data.get("work_state", {})
-        open_tasks = work_state.get("open_tasks", [])
-        blocked_tasks = work_state.get("blocked_tasks", [])
-        closed_tasks = work_state.get("closed_tasks", [])
-        prompt_parts.append(f"- Open tasks: {len(open_tasks)}")
-        prompt_parts.append(f"- Blocked tasks: {len(blocked_tasks)}")
-        prompt_parts.append(f"- Closed tasks: {len(closed_tasks)}")
-        if open_tasks:
-            prompt_parts.append("- Open task list:")
-            for task in open_tasks:
-                prompt_parts.append(f"  - [{task.get('id', 'unknown')}] {task.get('title', 'untitled')}")
-        if blocked_tasks:
-            prompt_parts.append("- Blocked task list:")
-            for task in blocked_tasks:
-                reason = task.get("blocker_reason", "unknown reason")
-                prompt_parts.append(f"  - [{task.get('id', 'unknown')}] {task.get('title', 'untitled')} (blocked: {reason})")
-        prompt_parts.append("")
+        full_tasks = work_state.get("full_tasks", [])
 
+        # Show global counts to explain scoping
+        global_open = work_state.get("global_open_count", 0)
+        global_closed = work_state.get("global_closed_count", 0)
+        scoped_open = len([t for t in full_tasks if t.get("status") == "open"])
+        if global_open != scoped_open:
+            prompt_parts.append(f"*Note: Showing {scoped_open} tasks scoped to milestone root. Project has {global_open} total open tasks.*")
+            prompt_parts.append("")
+
+        if full_tasks:
+            # Group by status
+            open_full = [t for t in full_tasks if t.get("status") == "open"]
+            closed_full = [t for t in full_tasks if t.get("status") == "closed"]
+            blocked_full = [t for t in full_tasks if t.get("status") == "blocked"]
+
+            if open_full:
+                prompt_parts.append("**Open:**")
+                for task in open_full:
+                    prompt_parts.append(f"- [{task.get('id', '?')}] {task.get('title', 'untitled')}")
+                    desc = task.get("description", "")
+                    if desc:
+                        # Truncate long descriptions, show first 200 chars
+                        desc_preview = desc[:200] + "..." if len(desc) > 200 else desc
+                        # Indent description
+                        for line in desc_preview.split("\n")[:3]:
+                            prompt_parts.append(f"  {line}")
+                prompt_parts.append("")
+
+            if blocked_full:
+                prompt_parts.append("**Blocked:**")
+                for task in blocked_full:
+                    prompt_parts.append(f"- [{task.get('id', '?')}] {task.get('title', 'untitled')}")
+                    desc = task.get("description", "")
+                    if desc:
+                        desc_preview = desc[:200] + "..." if len(desc) > 200 else desc
+                        for line in desc_preview.split("\n")[:3]:
+                            prompt_parts.append(f"  {line}")
+                prompt_parts.append("")
+
+            if closed_full:
+                prompt_parts.append("**Closed:**")
+                for task in closed_full:
+                    prompt_parts.append(f"- [{task.get('id', '?')}] {task.get('title', 'untitled')}")
+                    # For closed tasks, just show title (description less relevant)
+                prompt_parts.append("")
+        else:
+            # Fall back to basic task counts
+            open_tasks = work_state.get("open_tasks", [])
+            blocked_tasks = work_state.get("blocked_tasks", [])
+            closed_tasks = work_state.get("closed_tasks", [])
+            prompt_parts.append(f"- Open tasks: {len(open_tasks)}")
+            prompt_parts.append(f"- Blocked tasks: {len(blocked_tasks)}")
+            prompt_parts.append(f"- Closed tasks: {len(closed_tasks)}")
+            if open_tasks:
+                prompt_parts.append("- Open task list:")
+                for task in open_tasks:
+                    prompt_parts.append(f"  - [{task.get('id', 'unknown')}] {task.get('title', 'untitled')}")
+            if blocked_tasks:
+                prompt_parts.append("- Blocked task list:")
+                for task in blocked_tasks:
+                    reason = task.get("blocker_reason", "unknown reason")
+                    prompt_parts.append(f"  - [{task.get('id', 'unknown')}] {task.get('title', 'untitled')} (blocked: {reason})")
+            prompt_parts.append("")
+
+        # =====================================================================
+        # Project State
+        # =====================================================================
         prompt_parts.append("## Project State")
         project_state = claims_data.get("project_state", {})
         prompt_parts.append(f"- Current iteration: {project_state.get('iteration_number', 1)}")
@@ -1029,7 +1126,10 @@ def _build_orient_prompt(ctx: OrientContext) -> str:
 
 
 
-async def orient(ctx: OrientContext) -> OrientOutput:
+async def orient(
+    ctx: OrientContext,
+    streaming_callback: "StreamingCallbackProtocol | None" = None,
+) -> OrientOutput:
     """Execute the ORIENT phase: verify claims and assess spec satisfaction.
 
     The ORIENT phase verifies claims from SENSE against the codebase,
@@ -1038,6 +1138,7 @@ async def orient(ctx: OrientContext) -> OrientOutput:
 
     Args:
         ctx: OrientContext with claims, spec, and iteration history
+        streaming_callback: Optional callback for real-time streaming output
 
     Returns:
         OrientOutput with verification results, assessment, and iteration plan
@@ -1052,6 +1153,14 @@ async def orient(ctx: OrientContext) -> OrientOutput:
         output_schema=OrientOutput,
         tools=ORIENT_TOOLS,
         system_prompt=ORIENT_SYSTEM_PROMPT,
+        streaming_callback=streaming_callback,
     )
 
     return result
+
+
+# Type hint import for streaming callback
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from soda.agents.narrow import StreamingCallbackProtocol

@@ -8,8 +8,11 @@ without judgment. This module provides:
 All structures must be JSON-serializable for passing to ORIENT.
 """
 
+import json
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -42,6 +45,33 @@ class DiffSummary(BaseModel):
     lines_removed: int = Field(description="Number of lines removed")
 
 
+class FileChange(BaseModel):
+    """Detailed change information for a single file."""
+
+    path: str = Field(description="File path")
+    change_type: str = Field(description="Change type: added, modified, or deleted")
+    lines_added: int = Field(default=0, description="Lines added in this file")
+    lines_removed: int = Field(default=0, description="Lines removed in this file")
+
+
+class GitDelta(BaseModel):
+    """Detailed delta information since milestone base.
+
+    Provides per-file line counts and commit messages for ORIENT navigation.
+    """
+
+    files: list[FileChange] = Field(
+        default_factory=list,
+        description="Per-file change details",
+    )
+    commits: list["CommitInfo"] = Field(
+        default_factory=list,
+        description="Commits with full messages",
+    )
+    total_lines_added: int = Field(default=0, description="Total lines added")
+    total_lines_removed: int = Field(default=0, description="Total lines removed")
+
+
 class CodeStateClaims(BaseModel):
     """Claims about the current code state.
 
@@ -72,6 +102,10 @@ class CodeStateClaims(BaseModel):
         default=None,
         description="Summary of lines added/removed",
     )
+    git_delta: Optional[GitDelta] = Field(
+        default=None,
+        description="Detailed delta with per-file line counts and commit messages",
+    )
     no_base_commit: bool = Field(
         default=False,
         description="True if milestone base is empty (new project)",
@@ -96,6 +130,26 @@ class TaskInfo(BaseModel):
     blocker_reason: Optional[str] = Field(
         default=None,
         description="Reason for blocking (if status is blocked)",
+    )
+
+
+class TaskFull(BaseModel):
+    """Full task data read directly from trace JSONL.
+
+    Includes complete description for ORIENT context.
+    """
+
+    id: str = Field(description="Task ID (e.g., 'ralph-abc123')")
+    title: str = Field(description="Task title")
+    description: str = Field(default="", description="Full task description")
+    status: str = Field(description="Task status (open, closed, blocked)")
+    parent_id: Optional[str] = Field(
+        default=None,
+        description="Parent task ID if this is a subtask",
+    )
+    created_at: Optional[str] = Field(
+        default=None,
+        description="When the task was created (ISO format)",
     )
 
 
@@ -129,6 +183,18 @@ class WorkStateClaims(BaseModel):
     recent_comments: list[TaskComment] = Field(
         default_factory=list,
         description="Recent comments (last 10) on milestone tasks",
+    )
+    full_tasks: list[TaskFull] = Field(
+        default_factory=list,
+        description="Full task data with descriptions (from JSONL)",
+    )
+    global_open_count: int = Field(
+        default=0,
+        description="Total open tasks in project (unscoped - what trc list shows)",
+    )
+    global_closed_count: int = Field(
+        default=0,
+        description="Total closed tasks in project (unscoped)",
     )
     no_root_work_item: bool = Field(
         default=False,
@@ -245,6 +311,10 @@ class Claims(BaseModel):
         default="",
         description="Content from memory.md (learnings)",
     )
+    file_tree: str = Field(
+        default="",
+        description="File tree structure of the project",
+    )
 
 
 # =============================================================================
@@ -271,6 +341,88 @@ class SenseContext(BaseModel):
     )
     project_id: str = Field(description="Project UUID for state lookup")
     project_root: str = Field(description="Path to project root")
+
+
+# Default directories/files to exclude from file tree
+DEFAULT_IGNORES = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "dist",
+    "build",
+    "*.egg-info",
+    ".eggs",
+    ".coverage",
+    "htmlcov",
+    ".hypothesis",
+}
+
+
+def _collect_file_tree(project_root: str, max_depth: int = 5) -> str:
+    """Collect file tree structure of the project.
+
+    Args:
+        project_root: Path to the project root directory
+        max_depth: Maximum depth to traverse (default 5)
+
+    Returns:
+        Formatted tree string like the 'tree' command output
+    """
+    try:
+        root_path = Path(project_root)
+        if not root_path.exists():
+            return ""
+
+        lines: list[str] = []
+
+        def should_ignore(name: str) -> bool:
+            """Check if a file/directory should be ignored."""
+            if name in DEFAULT_IGNORES:
+                return True
+            # Check wildcard patterns
+            for pattern in DEFAULT_IGNORES:
+                if pattern.startswith("*") and name.endswith(pattern[1:]):
+                    return True
+            return False
+
+        def build_tree(path: Path, prefix: str = "", depth: int = 0) -> None:
+            """Recursively build tree structure."""
+            if depth > max_depth:
+                return
+
+            # Get children, filtering out ignored items
+            try:
+                children = sorted(
+                    [c for c in path.iterdir() if not should_ignore(c.name)],
+                    key=lambda x: (not x.is_dir(), x.name.lower()),
+                )
+            except PermissionError:
+                return
+
+            for i, child in enumerate(children):
+                is_last = i == len(children) - 1
+                connector = "└── " if is_last else "├── "
+                lines.append(f"{prefix}{connector}{child.name}")
+
+                if child.is_dir():
+                    extension = "    " if is_last else "│   "
+                    build_tree(child, prefix + extension, depth + 1)
+
+        # Start building from root
+        lines.append(root_path.name + "/")
+        build_tree(root_path)
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning(f"Failed to collect file tree: {e}")
+        return ""
 
 
 def _collect_code_state(
@@ -367,6 +519,78 @@ def _collect_code_state(
                 lines_removed=lines_removed,
             )
 
+        # Collect detailed git delta with per-file line counts
+        git_delta = None
+        try:
+            file_changes: list[FileChange] = []
+
+            # Get per-file line counts: git diff --numstat base..HEAD
+            numstat_result = git_client._run_git(
+                ["diff", "--numstat", f"{milestone_base}..HEAD"],
+                check=False,
+            )
+            numstat_map: dict[str, tuple[int, int]] = {}
+            if numstat_result.returncode == 0 and numstat_result.stdout.strip():
+                for line in numstat_result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        added_str, removed_str, filepath = parts[0], parts[1], parts[2]
+                        # Handle binary files (shown as '-')
+                        added = int(added_str) if added_str != "-" else 0
+                        removed = int(removed_str) if removed_str != "-" else 0
+                        numstat_map[filepath] = (added, removed)
+
+            # Get change types: git diff --name-status base..HEAD
+            name_status_result = git_client._run_git(
+                ["diff", "--name-status", f"{milestone_base}..HEAD"],
+                check=False,
+            )
+            if name_status_result.returncode == 0 and name_status_result.stdout.strip():
+                for line in name_status_result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        status_code, filepath = parts[0], parts[1]
+                        # Map status codes to human-readable types
+                        change_type_map = {
+                            "A": "added",
+                            "M": "modified",
+                            "D": "deleted",
+                            "R": "renamed",
+                            "C": "copied",
+                        }
+                        change_type = change_type_map.get(
+                            status_code[0], "modified"
+                        )
+                        lines_added_file, lines_removed_file = numstat_map.get(
+                            filepath, (0, 0)
+                        )
+                        file_changes.append(
+                            FileChange(
+                                path=filepath,
+                                change_type=change_type,
+                                lines_added=lines_added_file,
+                                lines_removed=lines_removed_file,
+                            )
+                        )
+
+            # Calculate totals
+            total_added = sum(fc.lines_added for fc in file_changes)
+            total_removed = sum(fc.lines_removed for fc in file_changes)
+
+            git_delta = GitDelta(
+                files=file_changes,
+                commits=commits,  # Reuse already-collected commits
+                total_lines_added=total_added,
+                total_lines_removed=total_removed,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to collect git delta: {e}")
+            # git_delta stays None
+
         return CodeStateClaims(
             branch=branch,
             staged_count=staged_count,
@@ -374,6 +598,7 @@ def _collect_code_state(
             commits=commits,
             files_changed=files_changed,
             diff_summary=diff_summary,
+            git_delta=git_delta,
             no_base_commit=False,
         )
 
@@ -386,13 +611,85 @@ def _collect_code_state(
             commits=[],
             files_changed=[],
             diff_summary=None,
+            git_delta=None,
             error=str(e),
         )
+
+
+def _collect_full_tasks(
+    project_root: str,
+    root_work_item_id: Optional[str],
+) -> list[TaskFull]:
+    """Collect full task data from .trace/issues.jsonl.
+
+    Reads the trace JSONL file directly to surface full task context
+    including descriptions, without relying on the trace CLI.
+
+    Args:
+        project_root: Path to the project root directory
+        root_work_item_id: Root work item ID to filter tasks (None = all tasks)
+
+    Returns:
+        List of TaskFull objects with complete task data
+    """
+    tasks: list[TaskFull] = []
+    jsonl_path = Path(project_root) / ".trace" / "issues.jsonl"
+
+    if not jsonl_path.exists():
+        logger.debug(f"Trace JSONL not found at {jsonl_path}")
+        return tasks
+
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    task_id = data.get("id", "")
+
+                    # Extract parent_id from dependencies
+                    parent_id = None
+                    deps = data.get("dependencies", [])
+                    for dep in deps:
+                        if dep.get("type") == "parent":
+                            parent_id = dep.get("depends_on_id")
+                            break
+
+                    # Filter by root if specified
+                    if root_work_item_id:
+                        # Include if task is root, or is a child of root
+                        if task_id != root_work_item_id and parent_id != root_work_item_id:
+                            # Check if any ancestor is the root (recursive check)
+                            # For now, only include direct children + root itself
+                            # A full implementation would traverse the tree
+                            continue
+
+                    tasks.append(
+                        TaskFull(
+                            id=task_id,
+                            title=data.get("title", ""),
+                            description=data.get("description", ""),
+                            status=data.get("status", "open"),
+                            parent_id=parent_id,
+                            created_at=data.get("created_at"),
+                        )
+                    )
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse trace line: {e}")
+                    continue
+
+    except Exception as e:
+        logger.warning(f"Failed to read trace JSONL: {e}")
+
+    return tasks
 
 
 def _collect_work_state(
     trace_client: TraceClient,
     root_work_item_id: Optional[str],
+    project_root: str,
 ) -> WorkStateClaims:
     """Collect work state claims from trace.
 
@@ -472,11 +769,22 @@ def _collect_work_state(
         all_comments.sort(key=lambda c: c.timestamp, reverse=True)
         recent_comments = all_comments[:10]
 
+        # Collect full task data from JSONL
+        full_tasks = _collect_full_tasks(project_root, root_work_item_id)
+
+        # Collect global counts (unscoped - what trc list shows)
+        all_tasks = _collect_full_tasks(project_root, None)  # No root filter
+        global_open_count = sum(1 for t in all_tasks if t.status == "open")
+        global_closed_count = sum(1 for t in all_tasks if t.status == "closed")
+
         return WorkStateClaims(
             open_tasks=open_tasks,
             blocked_tasks=blocked_tasks,
             closed_tasks=closed_tasks,
             recent_comments=recent_comments,
+            full_tasks=full_tasks,
+            global_open_count=global_open_count,
+            global_closed_count=global_closed_count,
             no_root_work_item=False,
         )
 
@@ -487,6 +795,9 @@ def _collect_work_state(
             blocked_tasks=[],
             closed_tasks=[],
             recent_comments=[],
+            full_tasks=[],
+            global_open_count=0,
+            global_closed_count=0,
             error=str(e),
         )
 
@@ -632,6 +943,7 @@ def sense(
     work_state = _collect_work_state(
         trace_client=trace_client,
         root_work_item_id=ctx.root_work_item_id,
+        project_root=ctx.project_root,
     )
 
     project_state = _collect_project_state(
@@ -652,6 +964,9 @@ def sense(
         logger.warning(f"Failed to read memory: {e}")
         learnings = ""
 
+    # Collect file tree
+    file_tree = _collect_file_tree(ctx.project_root)
+
     return Claims(
         timestamp=timestamp,
         iteration_number=ctx.iteration_number,
@@ -660,4 +975,5 @@ def sense(
         project_state=project_state,
         human_input=human_input,
         learnings=learnings,
+        file_tree=file_tree,
     )
