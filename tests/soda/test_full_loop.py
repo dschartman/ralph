@@ -207,7 +207,8 @@ class TestHappyPathEndToEnd:
             trace_client=mock_trace_client,
             db=temp_db,
         )
-        assert milestone_ctx.milestone_branch.startswith("soda/milestone-")
+        # Milestone branch is now current branch (work in place)
+        assert milestone_ctx.milestone_branch == git_client.get_current_branch()
 
         # Create run context
         run_ctx = RunContext(
@@ -223,7 +224,7 @@ class TestHappyPathEndToEnd:
         # Mock ORIENT to return CONTINUE once, then DONE
         call_count = [0]
 
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return create_continue_orient_output(intent="First iteration")
@@ -317,7 +318,7 @@ class TestStuckAndResume:
         )
 
         # Mock ORIENT to return STUCK
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             return create_stuck_orient_output("External API unavailable")
 
         # Run the loop
@@ -367,7 +368,7 @@ class TestStuckAndResume:
 
         first_call = [True]
 
-        async def mock_orient_with_resume(ctx):
+        async def mock_orient_with_resume(ctx, **kwargs):
             if first_call[0]:
                 first_call[0] = False
                 return create_stuck_orient_output("Need human input")
@@ -450,7 +451,7 @@ class TestMaxIterations:
         # Always return CONTINUE (never done)
         iteration_count = [0]
 
-        async def mock_orient_always_continue(ctx):
+        async def mock_orient_always_continue(ctx, **kwargs):
             iteration_count[0] += 1
             return create_continue_orient_output(
                 task_id=f"ralph-task{iteration_count[0]}",
@@ -501,7 +502,7 @@ class TestMaxIterations:
             run_id="test-run-max-progress",
         )
 
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             return create_continue_orient_output()
 
         mock_act_output = create_act_output(
@@ -590,7 +591,7 @@ class TestKickstart:
         # First iteration scaffolds, second completes
         call_count = [0]
 
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return create_continue_orient_output(intent="Scaffold project structure")
@@ -662,10 +663,10 @@ class TestBootstrapIdempotency:
         assert first_id == second_id
 
     @pytest.mark.asyncio
-    async def test_milestone_reused_on_resume(
+    async def test_work_item_reused_on_resume(
         self, temp_project_with_structure, simple_spec, mock_trace_client, temp_db
     ):
-        """Resuming reuses existing milestone branch and work item."""
+        """Resuming reuses existing work item (milestone branch is always current branch)."""
         spec_path = temp_project_with_structure / "Sodafile"
         spec_path.write_text(simple_spec)
 
@@ -683,15 +684,12 @@ class TestBootstrapIdempotency:
             spec_path=str(spec_path),
             spec_content=simple_spec,
             status=RunStatus.PAUSED,
-            milestone_branch="soda/milestone-existing",
+            milestone_branch="soda/milestone-existing",  # No longer used
             root_work_item_id="ralph-existing",
             config={},
             started_at=datetime.now(),
         )
         temp_db.create_run(run1)
-
-        # Create the branch so checkout works
-        git_client._run_git(["branch", "soda/milestone-existing"])
 
         # Setup milestone with run_id (resume mode)
         milestone_ctx = await setup_milestone(
@@ -703,9 +701,10 @@ class TestBootstrapIdempotency:
             run_id="existing-run",
         )
 
-        # Should reuse existing
+        # Should reuse existing work item
         assert milestone_ctx.is_resumed is True
-        assert milestone_ctx.milestone_branch == "soda/milestone-existing"
+        # Milestone branch is now always current branch (work in place)
+        assert milestone_ctx.milestone_branch == git_client.get_current_branch()
         assert milestone_ctx.root_work_item_id == "ralph-existing"
 
         # Trace should NOT have been called (no new work item)
@@ -768,7 +767,7 @@ class TestDatabaseRecording:
         # Two iterations then done
         call_count = [0]
 
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             call_count[0] += 1
             if call_count[0] < 3:
                 return create_continue_orient_output(intent=f"Iteration {call_count[0]}")

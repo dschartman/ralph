@@ -87,8 +87,8 @@ class TestNarrowAgentInvoke:
 
         agent = NarrowAgent()
 
-        # Mock the Claude SDK to return a valid response
-        mock_response = '{"result": "success"}'
+        # Mock returns dict (SDK handles JSON parsing)
+        mock_response = {"result": "success"}
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
             mock_call.return_value = mock_response
 
@@ -107,11 +107,12 @@ class TestNarrowAgentInvoke:
 
         agent = NarrowAgent()
 
-        mock_response = json.dumps({
+        # Mock returns dict (SDK handles JSON parsing)
+        mock_response = {
             "findings": ["Issue 1", "Issue 2"],
             "severity": "high",
             "recommendation": "Fix immediately"
-        })
+        }
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
             mock_call.return_value = mock_response
 
@@ -133,7 +134,7 @@ class TestNarrowAgentInvoke:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="My test prompt",
@@ -157,7 +158,7 @@ class TestNarrowAgentToolRestriction:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -177,7 +178,7 @@ class TestNarrowAgentToolRestriction:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -197,7 +198,7 @@ class TestNarrowAgentToolRestriction:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -222,7 +223,7 @@ class TestNarrowAgentOutputCapture:
             agent = NarrowAgent(output_dir=output_dir)
 
             with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-                mock_call.return_value = '{"result": "captured"}'
+                mock_call.return_value = {"result": "captured"}
 
                 await agent.invoke(
                     prompt="Test prompt for capture",
@@ -253,7 +254,7 @@ class TestNarrowAgentOutputCapture:
             long_prompt = "This is a very long prompt that should be truncated " * 10
 
             with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-                mock_call.return_value = '{"result": "success"}'
+                mock_call.return_value = {"result": "success"}
 
                 await agent.invoke(
                     prompt=long_prompt,
@@ -278,7 +279,7 @@ class TestNarrowAgentOutputCapture:
             agent = NarrowAgent(output_dir=output_dir)
 
             with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-                mock_call.return_value = '{"result": "still works"}'
+                mock_call.return_value = {"result": "still works"}
 
                 # Make capture fail
                 with patch.object(OutputCapture, 'capture', side_effect=Exception("Capture failed")):
@@ -298,15 +299,15 @@ class TestNarrowAgentValidation:
     async def test_invalid_output_raises_validation_error(self):
         """WHEN agent returns invalid output THEN validation error is raised."""
         from soda.agents.narrow import NarrowAgent
-        from soda.validation import StructuredOutputValidationError
+        from pydantic import ValidationError
 
         agent = NarrowAgent()
 
-        # Return output missing required field
+        # Return output missing required field (SDK returns dict)
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"wrong_field": "value"}'
+            mock_call.return_value = {"wrong_field": "value"}
 
-            with pytest.raises(StructuredOutputValidationError) as exc_info:
+            with pytest.raises(ValidationError) as exc_info:
                 await agent.invoke(
                     prompt="Test prompt",
                     output_schema=SimpleOutput
@@ -315,23 +316,27 @@ class TestNarrowAgentValidation:
         assert "result" in str(exc_info.value).lower() or "field" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
-    async def test_invalid_json_raises_validation_error(self):
-        """WHEN agent returns invalid JSON THEN validation error is raised."""
+    async def test_structured_output_failure_raises_fatal_error(self):
+        """WHEN SDK fails to get structured output THEN FatalError is raised."""
         from soda.agents.narrow import NarrowAgent
-        from soda.validation import StructuredOutputValidationError
+        from soda.errors import FatalError
 
         agent = NarrowAgent()
 
+        # SDK raises FatalError when structured output extraction fails
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = 'not valid json at all'
+            mock_call.side_effect = FatalError(
+                "Failed to get structured output after SDK retries",
+                status_code=500
+            )
 
-            with pytest.raises(StructuredOutputValidationError) as exc_info:
+            with pytest.raises(FatalError) as exc_info:
                 await agent.invoke(
                     prompt="Test prompt",
                     output_schema=SimpleOutput
                 )
 
-        assert "json" in str(exc_info.value).lower()
+        assert "structured output" in str(exc_info.value).lower()
 
 
 class TestNarrowAgentErrorHandling:
@@ -352,7 +357,7 @@ class TestNarrowAgentErrorHandling:
             call_count += 1
             if call_count < 3:
                 raise TransientError("Rate limited", status_code=429)
-            return '{"result": "success"}'
+            return {"result": "success"}
 
         with patch.object(agent, '_call_agent', side_effect=mock_call):
             result = await agent.invoke(
@@ -418,7 +423,7 @@ class TestNarrowAgentModel:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -437,7 +442,7 @@ class TestNarrowAgentModel:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -460,7 +465,7 @@ class TestNarrowAgentSystemPrompt:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -480,7 +485,7 @@ class TestNarrowAgentSystemPrompt:
         test_system_prompt = "You are a helpful assistant that follows instructions carefully."
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -514,7 +519,7 @@ Key behaviors:
 """ * 10  # Make it even longer
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",
@@ -533,7 +538,7 @@ Key behaviors:
         agent = NarrowAgent()
 
         with patch.object(agent, '_call_agent', new_callable=AsyncMock) as mock_call:
-            mock_call.return_value = '{"result": "success"}'
+            mock_call.return_value = {"result": "success"}
 
             await agent.invoke(
                 prompt="Test prompt",

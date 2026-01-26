@@ -235,18 +235,21 @@ class TestWriteMemory:
 
             assert memory_path.read_text() == "New content"
 
-    def test_logs_warning_for_large_memory(self, tmp_path, caplog):
+    def test_logs_warning_for_large_memory(self, tmp_path):
         """Logs warning when memory exceeds 50KB."""
         project_id = str(uuid.uuid4())
         # Create content larger than 50KB (50 * 1024 = 51200 bytes)
         large_content = "x" * 52000
 
         with patch.object(project, "SODA_PROJECTS_DIR", tmp_path / "projects"):
-            with caplog.at_level(logging.WARNING):
+            with patch.object(project.logger, "warning") as mock_warning:
                 project.write_memory(project_id, large_content)
 
-            assert "memory" in caplog.text.lower()
-            assert "50KB" in caplog.text or "50kb" in caplog.text.lower() or "51200" in caplog.text or "curation" in caplog.text.lower()
+                # Verify warning was logged
+                mock_warning.assert_called_once()
+                call_args = mock_warning.call_args[0][0]
+                assert "memory" in call_args.lower()
+                assert "50KB" in call_args or "curation" in call_args.lower()
 
 
 class TestEnsureSodaIdInGitignore:

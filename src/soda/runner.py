@@ -16,7 +16,7 @@ This module contains:
 - run_loop(): Execute iterations until DONE, STUCK, or max iterations
 """
 
-import hashlib
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -336,23 +336,6 @@ def extract_spec_title(spec_content: str) -> str:
     return "SODA Work Item"
 
 
-def _generate_milestone_branch_name(spec_content: str) -> str:
-    """Generate a milestone branch name from spec content.
-
-    Creates a branch name like "soda/milestone-<short-hash>" where
-    the hash is derived from the spec content for uniqueness.
-
-    Args:
-        spec_content: The spec file content
-
-    Returns:
-        A branch name like "soda/milestone-a1b2c3d4"
-    """
-    # Create a short hash from spec content
-    content_hash = hashlib.sha256(spec_content.encode()).hexdigest()[:8]
-    return f"soda/milestone-{content_hash}"
-
-
 async def setup_milestone(
     project_id: str,
     spec_content: str,
@@ -361,15 +344,13 @@ async def setup_milestone(
     db: SodaDB,
     run_id: Optional[str] = None,
 ) -> MilestoneContext:
-    """Setup milestone branch and root work item for a SODA run.
+    """Setup milestone context for a SODA run.
 
-    This function:
-    1. Creates a milestone branch (or reuses existing one on resume)
+    This function works in place on the current branch:
+    1. Records the current branch name (no branch creation/switching)
     2. Creates a root work item in Trace (or reuses existing one on resume)
-    3. Checks out the milestone branch
 
     On resume (when run_id is provided), it will:
-    - Reuse the existing milestone branch from the run
     - Reuse the existing root work item from the run
 
     Args:
@@ -378,46 +359,34 @@ async def setup_milestone(
         git_client: GitClient for git operations
         trace_client: TraceClient for Trace operations
         db: SodaDB for state persistence
-        run_id: Optional run ID for resume (reuses existing branch/work item)
+        run_id: Optional run ID for resume (reuses existing work item)
 
     Returns:
-        MilestoneContext with branch name, work item ID, and resume status
+        MilestoneContext with current branch name, work item ID, and resume status
 
     Raises:
         MilestoneError: If milestone setup fails
     """
     is_resumed = False
-    milestone_branch: Optional[str] = None
     root_work_item_id: Optional[str] = None
+
+    # --- Get current branch (work in place, no branch switching) ---
+    try:
+        current_branch = git_client.get_current_branch()
+        logger.info(f"Working on branch: {current_branch}")
+    except GitError as e:
+        raise MilestoneError(f"Failed to get current branch: {e}") from e
 
     # --- Handle resume case ---
     if run_id is not None:
         existing_run = db.get_run(run_id)
         if existing_run is not None:
-            milestone_branch = existing_run.milestone_branch
             root_work_item_id = existing_run.root_work_item_id
-            if milestone_branch and root_work_item_id:
+            if root_work_item_id:
                 logger.info(
-                    f"Resuming run: branch={milestone_branch}, "
-                    f"work_item={root_work_item_id}"
+                    f"Resuming run: work_item={root_work_item_id}"
                 )
                 is_resumed = True
-
-    # --- Create milestone branch if needed ---
-    if milestone_branch is None:
-        desired_branch = _generate_milestone_branch_name(spec_content)
-        try:
-            milestone_branch = git_client.create_branch(desired_branch)
-            logger.info(f"Created milestone branch: {milestone_branch}")
-        except GitError as e:
-            raise MilestoneError(f"Failed to create milestone branch: {e}") from e
-
-    # --- Checkout the milestone branch ---
-    try:
-        git_client.checkout_branch(milestone_branch)
-        logger.debug(f"Checked out branch: {milestone_branch}")
-    except GitError as e:
-        raise MilestoneError(f"Failed to checkout milestone branch: {e}") from e
 
     # --- Create root work item if needed ---
     if root_work_item_id is None:
@@ -441,7 +410,7 @@ async def setup_milestone(
             root_work_item_id = ""  # Empty string to indicate no work item
 
     return MilestoneContext(
-        milestone_branch=milestone_branch,
+        milestone_branch=current_branch,
         root_work_item_id=root_work_item_id,
         is_resumed=is_resumed,
     )
@@ -458,6 +427,7 @@ async def run_iteration(
     git_client: GitClient,
     trace_client: TraceClient,
     db: SodaDB,
+    quiet: bool = False,
 ) -> IterationResult:
     """Execute a single iteration of the SODA loop.
 
@@ -470,10 +440,16 @@ async def run_iteration(
         git_client: GitClient for git operations
         trace_client: TraceClient for Trace operations
         db: SodaDB for state persistence
+        quiet: If True, suppress streaming output (default: False, always stream)
 
     Returns:
         IterationResult with the iteration outcome and phase outputs
     """
+    # Create streaming callback (always on unless quiet mode)
+    streaming_callback = None
+    if not quiet:
+        from soda.agents.streaming import StreamingCallback
+        streaming_callback = StreamingCallback(verbose=True)
     # --- SENSE Phase ---
     logger.info("📡 SENSE: Gathering claims...")
     sense_ctx = SenseContext(
@@ -499,7 +475,7 @@ async def run_iteration(
         iteration_history=iteration_history,
         root_work_item_id=ctx.root_work_item_id,
     )
-    orient_output = await orient(orient_ctx)
+    orient_output = await orient(orient_ctx, streaming_callback=streaming_callback)
     logger.info(f"   spec_satisfied={orient_output.spec_satisfied.value}, actionable_work={orient_output.actionable_work_exists}")
     if orient_output.gaps:
         logger.info(f"   {len(orient_output.gaps)} gap(s) identified")
@@ -535,7 +511,9 @@ async def run_iteration(
                 milestone_branch=ctx.milestone_branch,
                 working_directory=ctx.working_directory,
             )
-            act_output = await act(act_ctx, git_client, trace_client)
+            act_output = await act(
+                act_ctx, git_client, trace_client, streaming_callback=streaming_callback
+            )
             logger.info(f"   ✓ {len(act_output.tasks_completed)} completed, {len(act_output.tasks_blocked)} blocked")
 
     return IterationResult(
@@ -590,11 +568,35 @@ def _build_iteration_history(
 # =============================================================================
 
 
+def _sdk_exception_handler(loop: "asyncio.AbstractEventLoop", context: dict) -> None:
+    """Custom exception handler that suppresses SDK cancel scope errors.
+
+    The Claude Agent SDK has a bug where async generator cleanup can raise
+    RuntimeError about cancel scopes being exited in different tasks.
+    These errors are logged as "Task exception was never retrieved" and
+    can interfere with subsequent operations.
+
+    This handler suppresses those specific errors while letting other
+    exceptions through to the default handler.
+    """
+    exception = context.get("exception")
+    if isinstance(exception, RuntimeError):
+        msg = str(exception).lower()
+        if "cancel scope" in msg and "different task" in msg:
+            # Suppress SDK cancel scope errors
+            logger.debug(f"Suppressed SDK background task error: {exception}")
+            return
+
+    # Use default handling for other exceptions
+    loop.default_exception_handler(context)
+
+
 async def run_loop(
     ctx: RunContext,
     git_client: GitClient,
     trace_client: TraceClient,
     db: SodaDB,
+    quiet: bool = False,
 ) -> RunResult:
     """Execute the full SODA loop until termination.
 
@@ -608,10 +610,16 @@ async def run_loop(
         git_client: GitClient for git operations
         trace_client: TraceClient for Trace operations
         db: SodaDB for state persistence
+        quiet: If True, suppress streaming output (default: False, always stream)
 
     Returns:
         RunResult with termination status and summary
     """
+    # Install custom exception handler to suppress SDK cancel scope errors
+    # This reduces log spam from the SDK's background task cleanup failures
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_sdk_exception_handler)
+
     logger.info(f"Starting SODA loop (max {ctx.max_iterations} iterations)")
 
     iterations_completed = 0
@@ -627,6 +635,7 @@ async def run_loop(
                 git_client=git_client,
                 trace_client=trace_client,
                 db=db,
+                quiet=quiet,
             )
             iterations_completed = iteration_num
             last_result = result

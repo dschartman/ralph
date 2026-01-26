@@ -405,103 +405,6 @@ class TestTestBaseline:
 
 
 # =============================================================================
-# Workspace Setup Tests (Orchestrator Functions)
-# =============================================================================
-
-
-class TestCreateWorkBranch:
-    """Tests for create_work_branch() orchestrator function."""
-
-    def test_creates_branch_with_iteration_pattern(self, git_repo):
-        """WHEN creating work branch THEN uses soda/iteration-N pattern."""
-        from soda.act import create_work_branch
-        from soda.state.git import GitClient
-
-        client = GitClient(cwd=str(git_repo))
-        branch_name = create_work_branch(client, iteration_num=1)
-
-        assert branch_name == "soda/iteration-1"
-
-    def test_creates_branch_from_current_head(self, git_repo):
-        """WHEN creating work branch THEN creates from current HEAD."""
-        import subprocess
-        from soda.act import create_work_branch
-        from soda.state.git import GitClient
-
-        client = GitClient(cwd=str(git_repo))
-        branch_name = create_work_branch(client, iteration_num=1)
-
-        # Verify branch was created
-        result = subprocess.run(
-            ["git", "branch", "--list", branch_name],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        assert branch_name in result.stdout
-
-    def test_creates_branch_from_milestone_branch(self, git_repo):
-        """WHEN milestone_branch provided THEN creates from that branch."""
-        import subprocess
-        from soda.act import create_work_branch
-        from soda.state.git import GitClient
-
-        # Create milestone branch with a different commit
-        subprocess.run(
-            ["git", "checkout", "-b", "feature/milestone"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-        (git_repo / "milestone.txt").write_text("milestone content\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Milestone commit"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        client = GitClient(cwd=str(git_repo))
-        branch_name = create_work_branch(
-            client, iteration_num=1, milestone_branch="feature/milestone"
-        )
-
-        assert branch_name == "soda/iteration-1"
-
-    def test_handles_existing_branch_with_suffix(self, git_repo):
-        """WHEN iteration branch exists THEN adds suffix."""
-        import subprocess
-        from soda.act import create_work_branch
-        from soda.state.git import GitClient
-
-        # Create existing iteration-1 branch
-        subprocess.run(
-            ["git", "branch", "soda/iteration-1"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        client = GitClient(cwd=str(git_repo))
-        branch_name = create_work_branch(client, iteration_num=1)
-
-        assert branch_name == "soda/iteration-1-2"
-
-    def test_checkouts_new_branch(self, git_repo):
-        """WHEN creating work branch THEN checks it out."""
-        from soda.act import create_work_branch
-        from soda.state.git import GitClient
-
-        client = GitClient(cwd=str(git_repo))
-        branch_name = create_work_branch(client, iteration_num=3)
-
-        # Verify we're now on the new branch
-        current = client.get_current_branch()
-        assert current == branch_name
-
-
-# =============================================================================
 # Test Baseline Capture Tests
 # =============================================================================
 
@@ -1317,254 +1220,6 @@ class TestCreateSubtask:
 
 
 # =============================================================================
-# FinalizeResult Model Tests
-# =============================================================================
-
-
-class TestFinalizeResult:
-    """Tests for FinalizeResult model (finalize iteration outcome)."""
-
-    def test_finalize_result_successful_merge(self):
-        """FinalizeResult can represent successful merge and cleanup."""
-        from soda.act import FinalizeResult
-
-        result = FinalizeResult(
-            success=True,
-            merged=True,
-            branch_deleted=True,
-            conflict_reason=None,
-        )
-        assert result.success is True
-        assert result.merged is True
-        assert result.branch_deleted is True
-        assert result.conflict_reason is None
-
-    def test_finalize_result_failed_merge(self):
-        """FinalizeResult can represent failed merge with conflict."""
-        from soda.act import FinalizeResult
-
-        result = FinalizeResult(
-            success=False,
-            merged=False,
-            branch_deleted=False,
-            conflict_reason="Conflicting changes in README.md",
-        )
-        assert result.success is False
-        assert result.merged is False
-        assert result.branch_deleted is False
-        assert result.conflict_reason == "Conflicting changes in README.md"
-
-    def test_finalize_result_serialization(self):
-        """FinalizeResult can be serialized to dict."""
-        from soda.act import FinalizeResult
-
-        result = FinalizeResult(
-            success=True,
-            merged=True,
-            branch_deleted=True,
-            conflict_reason=None,
-        )
-        data = result.model_dump()
-        assert data["success"] is True
-        assert data["merged"] is True
-        assert data["branch_deleted"] is True
-        assert data["conflict_reason"] is None
-
-
-# =============================================================================
-# finalize_iteration Function Tests
-# =============================================================================
-
-
-class TestFinalizeIteration:
-    """Tests for finalize_iteration() orchestrator function."""
-
-    def test_successful_merge_and_branch_deletion(self, git_repo):
-        """WHEN merge succeeds THEN returns success=True and deletes work branch."""
-        import subprocess
-        from soda.act import finalize_iteration
-        from soda.state.git import GitClient
-
-        # Create a work branch with changes
-        subprocess.run(
-            ["git", "checkout", "-b", "soda/iteration-1"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-        (git_repo / "work_file.txt").write_text("work content\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Work commit"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        # Get main branch name
-        subprocess.run(
-            ["git", "checkout", "main"],
-            cwd=git_repo,
-            capture_output=True,
-        )
-        # If main doesn't exist, try master
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        if "main" not in result.stdout:
-            subprocess.run(
-                ["git", "checkout", "master"],
-                cwd=git_repo,
-                capture_output=True,
-            )
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        milestone_branch = result.stdout.strip()
-
-        client = GitClient(cwd=str(git_repo))
-        result = finalize_iteration(
-            client,
-            work_branch="soda/iteration-1",
-            milestone_branch=milestone_branch,
-        )
-
-        assert result.success is True
-        assert result.merged is True
-        assert result.branch_deleted is True
-        assert result.conflict_reason is None
-
-        # Verify the work file is now in milestone branch
-        assert (git_repo / "work_file.txt").exists()
-
-        # Verify work branch is deleted
-        branch_list = subprocess.run(
-            ["git", "branch", "--list", "soda/iteration-1"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        assert "soda/iteration-1" not in branch_list.stdout
-
-    def test_merge_conflict_preserves_work_branch(self, git_repo):
-        """WHEN merge has conflict THEN returns success=False and preserves work branch."""
-        import subprocess
-        from soda.act import finalize_iteration
-        from soda.state.git import GitClient
-
-        # Get current branch (milestone)
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        milestone_branch = result.stdout.strip()
-
-        # Create conflicting change on milestone branch
-        (git_repo / "README.md").write_text("# Milestone content\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Milestone change"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        # Create work branch from earlier commit with conflicting change
-        subprocess.run(
-            ["git", "checkout", "-b", "soda/iteration-1", "HEAD~1"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-        (git_repo / "README.md").write_text("# Work content - conflicting\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Work commit"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        client = GitClient(cwd=str(git_repo))
-        result = finalize_iteration(
-            client,
-            work_branch="soda/iteration-1",
-            milestone_branch=milestone_branch,
-        )
-
-        assert result.success is False
-        assert result.merged is False
-        assert result.branch_deleted is False
-        assert result.conflict_reason is not None
-
-        # Clean up the merge state
-        subprocess.run(
-            ["git", "merge", "--abort"],
-            cwd=git_repo,
-            capture_output=True,
-        )
-
-        # Verify work branch still exists
-        branch_list = subprocess.run(
-            ["git", "branch", "--list", "soda/iteration-1"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        assert "soda/iteration-1" in branch_list.stdout
-
-    def test_ends_on_milestone_branch_after_success(self, git_repo):
-        """WHEN finalize succeeds THEN ends on milestone branch."""
-        import subprocess
-        from soda.act import finalize_iteration
-        from soda.state.git import GitClient
-
-        # Get current branch (milestone)
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-        )
-        milestone_branch = result.stdout.strip()
-
-        # Create a work branch with non-conflicting changes
-        subprocess.run(
-            ["git", "checkout", "-b", "soda/iteration-2"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-        (git_repo / "new_file.txt").write_text("new content\n")
-        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "New file commit"],
-            cwd=git_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        client = GitClient(cwd=str(git_repo))
-        finalize_iteration(
-            client,
-            work_branch="soda/iteration-2",
-            milestone_branch=milestone_branch,
-        )
-
-        # Should be on milestone branch
-        current = client.get_current_branch()
-        assert current == milestone_branch
-
-
-# =============================================================================
 # ActContext Model Tests
 # =============================================================================
 
@@ -1666,16 +1321,17 @@ class TestActContext:
                 milestone_branch="main",
             )
 
-    def test_act_context_requires_milestone_branch(self):
-        """ActContext requires milestone_branch."""
+    def test_act_context_milestone_branch_defaults_to_empty(self):
+        """ActContext milestone_branch defaults to empty string."""
         from soda.act import ActContext
 
-        with pytest.raises(ValidationError):
-            ActContext(
-                iteration_plan_json='{}',
-                spec_content="spec",
-                iteration_num=1,
-            )
+        # milestone_branch is now optional with default ""
+        ctx = ActContext(
+            iteration_plan_json='{}',
+            spec_content="spec",
+            iteration_num=1,
+        )
+        assert ctx.milestone_branch == ""
 
 
 # =============================================================================
@@ -1930,27 +1586,6 @@ class TestActFunction:
         )
 
     @pytest.mark.asyncio
-    async def test_act_creates_work_branch(
-        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
-    ):
-        """WHEN act() runs THEN creates work branch for iteration."""
-        from soda.act import act
-
-        # Mock capture_test_baseline
-        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
-            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
-        ))
-        # Mock verify_task
-        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
-            passed=True, new_failures=[], regressions=False
-        ))
-
-        await act(act_context, mock_git_client, mock_trace_client)
-
-        mock_git_client.create_branch.assert_called_once()
-        mock_git_client.checkout_branch.assert_called()
-
-    @pytest.mark.asyncio
     async def test_act_captures_test_baseline(
         self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
     ):
@@ -2166,25 +1801,6 @@ class TestActFunction:
         assert len(result.new_subtasks) >= 1
 
     @pytest.mark.asyncio
-    async def test_act_finalizes_iteration(
-        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
-    ):
-        """WHEN act() completes THEN merges work branch to milestone branch."""
-        from soda.act import act
-
-        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
-            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
-        ))
-        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
-            passed=True, new_failures=[], regressions=False
-        ))
-
-        await act(act_context, mock_git_client, mock_trace_client)
-
-        mock_git_client.merge_branch.assert_called()
-        mock_git_client.delete_branch.assert_called()
-
-    @pytest.mark.asyncio
     async def test_act_handles_agent_invocation_error(
         self, mock_git_client, mock_trace_client, act_context, mocker
     ):
@@ -2204,28 +1820,6 @@ class TestActFunction:
 
         assert len(result.tasks_blocked) == 1
         assert "Agent invocation failed" in result.tasks_blocked[0].reason
-
-    @pytest.mark.asyncio
-    async def test_act_handles_finalize_failure(
-        self, mock_narrow_agent, mock_git_client, mock_trace_client, act_context, mocker
-    ):
-        """WHEN finalize merge fails THEN records learning about conflict."""
-        from soda.act import act
-
-        mock_git_client.merge_branch.return_value = False
-
-        mocker.patch("soda.act.capture_test_baseline", return_value=mocker.MagicMock(
-            has_tests=True, passed=5, failed=0, total=5, failed_tests=[]
-        ))
-        mocker.patch("soda.act.verify_task", return_value=mocker.MagicMock(
-            passed=True, new_failures=[], regressions=False
-        ))
-
-        result = await act(act_context, mock_git_client, mock_trace_client)
-
-        # Should record merge conflict as learning
-        conflict_learnings = [l for l in result.learnings if "conflict" in l.lower() or "merge" in l.lower()]
-        assert len(conflict_learnings) >= 1
 
 
 # =============================================================================

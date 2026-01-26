@@ -39,6 +39,7 @@ logging.basicConfig(
 # SODA logger at INFO with a console handler for user-visible progress
 _soda_logger = logging.getLogger("soda")
 _soda_logger.setLevel(logging.INFO)
+_soda_logger.propagate = False  # Don't propagate to root (avoids "INFO:" prefix)
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(logging.INFO)
 _console_handler.setFormatter(logging.Formatter("%(message)s"))
@@ -83,6 +84,12 @@ def run(
         "--max-iterations",
         "-m",
         help="Maximum number of iterations before halting",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress streaming output (tool calls)",
     ),
 ):
     """
@@ -167,7 +174,7 @@ def run(
 
         # Run the loop
         console.print("\n[bold]Starting SODA loop...[/bold]\n")
-        result = asyncio.run(run_loop(run_ctx, git_client, trace_client, db))
+        result = asyncio.run(run_loop(run_ctx, git_client, trace_client, db, quiet=quiet))
 
         # Update run status
         final_status = {
@@ -334,6 +341,12 @@ def resume(
         "-m",
         help="Maximum additional iterations to run",
     ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress streaming output (tool calls)",
+    ),
 ):
     """
     Resume a paused or interrupted SODA run.
@@ -413,7 +426,7 @@ def resume(
 
         # Continue the loop
         console.print("\n[bold]Continuing SODA loop...[/bold]\n")
-        result = asyncio.run(run_loop(run_ctx, git_client, trace_client, db))
+        result = asyncio.run(run_loop(run_ctx, git_client, trace_client, db, quiet=quiet))
 
         # Update run status
         final_status = {

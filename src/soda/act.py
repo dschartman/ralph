@@ -16,6 +16,7 @@ ACT outputs:
 - commits: git commit hashes created
 """
 
+import asyncio
 import logging
 import re
 import subprocess
@@ -177,33 +178,8 @@ class VerifyResult(BaseModel):
 
 
 # =============================================================================
-# Workspace Setup Functions (Orchestrator)
+# Test Functions (Orchestrator)
 # =============================================================================
-
-
-def create_work_branch(
-    git_client: "GitClient",
-    iteration_num: int,
-    milestone_branch: Optional[str] = None,
-) -> str:
-    """Create a work branch for the current iteration.
-
-    Creates a new branch following the pattern `soda/iteration-N` and checks it out.
-    If a branch with that name already exists, a numbered suffix is added
-    (e.g., soda/iteration-1-2, soda/iteration-1-3).
-
-    Args:
-        git_client: GitClient instance for git operations
-        iteration_num: The iteration number (used in branch name)
-        milestone_branch: Optional base branch to create from. If None, uses HEAD.
-
-    Returns:
-        The actual branch name created (may have suffix if original existed)
-    """
-    branch_name = f"soda/iteration-{iteration_num}"
-    actual_name = git_client.create_branch(branch_name, milestone_branch)
-    git_client.checkout_branch(actual_name)
-    return actual_name
 
 
 def _run_pytest(cwd: Optional[str] = None) -> tuple[str, int]:
@@ -591,83 +567,6 @@ def create_subtask(
 
 
 # =============================================================================
-# FinalizeResult Structure
-# =============================================================================
-
-
-class FinalizeResult(BaseModel):
-    """Result of finalize_iteration operation.
-
-    Captures the outcome of merging the work branch to the milestone branch
-    and cleaning up afterward.
-    """
-
-    success: bool = Field(
-        description="Whether finalization succeeded (merge complete, branch deleted)"
-    )
-    merged: bool = Field(description="Whether the merge was successful")
-    branch_deleted: bool = Field(description="Whether the work branch was deleted")
-    conflict_reason: Optional[str] = Field(
-        default=None,
-        description="Reason for failure if merge had conflicts",
-    )
-
-
-# =============================================================================
-# Finalize Function (Orchestrator)
-# =============================================================================
-
-
-def finalize_iteration(
-    git_client: "GitClient",
-    work_branch: str,
-    milestone_branch: str,
-) -> FinalizeResult:
-    """Merge work branch to milestone branch and clean up.
-
-    This function finalizes an iteration by:
-    1. Checking out the milestone branch
-    2. Attempting to merge the work branch
-    3. If merge succeeds: deleting the work branch
-    4. If merge fails: preserving the work branch for investigation
-
-    Args:
-        git_client: GitClient instance for git operations
-        work_branch: Name of the work branch to merge (e.g., 'soda/iteration-1')
-        milestone_branch: Name of the milestone branch to merge into
-
-    Returns:
-        FinalizeResult with:
-        - success: True if merge succeeded and branch was deleted
-        - merged: True if merge completed without conflicts
-        - branch_deleted: True if work branch was deleted
-        - conflict_reason: Reason if merge failed (None if successful)
-    """
-    # Attempt to merge work branch into milestone branch
-    # merge_branch() handles checkout of target branch internally
-    merge_succeeded = git_client.merge_branch(work_branch, milestone_branch)
-
-    if not merge_succeeded:
-        # Merge failed (conflict) - preserve work branch for investigation
-        return FinalizeResult(
-            success=False,
-            merged=False,
-            branch_deleted=False,
-            conflict_reason=f"Merge conflict when merging {work_branch} into {milestone_branch}",
-        )
-
-    # Merge succeeded - delete the work branch
-    git_client.delete_branch(work_branch)
-
-    return FinalizeResult(
-        success=True,
-        merged=True,
-        branch_deleted=True,
-        conflict_reason=None,
-    )
-
-
-# =============================================================================
 # ACT Context Structure
 # =============================================================================
 
@@ -676,6 +575,7 @@ class ActContext(BaseModel):
     """Context required for the ACT phase.
 
     Contains all the information needed to execute the iteration plan.
+    ACT works in place on the current branch (no branch switching).
     """
 
     iteration_plan_json: str = Field(
@@ -687,7 +587,10 @@ class ActContext(BaseModel):
     )
     spec_content: str = Field(description="The specification content for context")
     iteration_num: int = Field(description="Current iteration number")
-    milestone_branch: str = Field(description="Branch to merge back to after ACT")
+    milestone_branch: str = Field(
+        default="",
+        description="Current branch name (informational, no branch switching)",
+    )
     working_directory: Optional[str] = Field(
         default=None,
         description="Working directory for the project (None = current dir)",
@@ -832,16 +735,6 @@ Your output must be valid TaskExecutionResult JSON:
 If `blocked` is true, `blocker_reason` is required.
 If `completed` is false but not blocked, explain why in `progress_notes`.
 
----
-
-## CRITICAL: Output Format
-
-Your FINAL response must be ONLY the TaskExecutionResult JSON object. Do not include:
-- Explanatory text before or after the JSON
-- Markdown code fences (no ```json)
-- Commentary about what you're doing
-
-After completing your work, output ONLY the raw JSON object.
 """
 
 
@@ -858,23 +751,23 @@ async def act(
     ctx: ActContext,
     git_client: "GitClient",
     trace_client: "TraceClient",
+    streaming_callback: "StreamingCallbackProtocol | None" = None,
 ) -> ActOutput:
     """Execute the ACT phase: implement tasks from the iteration plan.
 
-    The ACT phase:
-    1. Creates a work branch for the iteration
-    2. Captures test baseline
-    3. Executes each task in the iteration plan (via agent)
-    4. Verifies each task (runs tests, compares to baseline)
-    5. Commits changes at task boundaries
-    6. Updates Trace with progress/completion/blockers
-    7. Captures learnings
-    8. Finalizes by merging work branch to milestone branch
+    The ACT phase works in place on the current branch:
+    1. Captures test baseline
+    2. Executes each task in the iteration plan (via agent)
+    3. Verifies each task (runs tests, compares to baseline)
+    4. Commits changes at task boundaries
+    5. Updates Trace with progress/completion/blockers
+    6. Captures learnings
 
     Args:
         ctx: ActContext with iteration plan and configuration
         git_client: GitClient instance for git operations
         trace_client: TraceClient instance for Trace operations
+        streaming_callback: Optional callback for real-time streaming output
 
     Returns:
         ActOutput with completed tasks, blocked tasks, comments, subtasks,
@@ -896,21 +789,22 @@ async def act(
     commits: list[str] = []
 
     # --- Setup Workspace ---
-    # Create work branch for this iteration
-    work_branch = create_work_branch(
-        git_client,
-        ctx.iteration_num,
-        ctx.milestone_branch,
-    )
+    # Work in place on current branch (no branch creation/switching)
 
     # Capture test baseline before making changes
     baseline = capture_test_baseline(ctx.working_directory)
 
     # --- Execute Each Task ---
-    for planned_task in iteration_plan.tasks:
+    for task_index, planned_task in enumerate(iteration_plan.tasks):
         task_id = planned_task.task_id
         task_title = planned_task.title
         task_rationale = planned_task.rationale
+
+        # Small delay between tasks to allow SDK async cleanup to complete
+        # This works around a bug in claude_agent_sdk where cancel scopes
+        # can get confused between sequential agent invocations
+        if task_index > 0:
+            await asyncio.sleep(0.5)
 
         # Build prompt for the executor agent
         prompt = _build_executor_prompt(
@@ -930,6 +824,7 @@ async def act(
                 output_schema=TaskExecutionResult,
                 tools=EXECUTOR_TOOLS,
                 system_prompt=EXECUTOR_SYSTEM_PROMPT,
+                streaming_callback=streaming_callback,
             )
         except Exception as e:
             # Agent invocation failed - mark task as blocked
@@ -1023,19 +918,8 @@ async def act(
             if commit_result["commit_hash"]:
                 commits.append(commit_result["commit_hash"])
 
-    # --- Finalize ---
-    # Merge work branch back to milestone branch
-    finalize_result = finalize_iteration(
-        git_client,
-        work_branch,
-        ctx.milestone_branch,
-    )
-
-    # If finalize failed, record it as a learning
-    if not finalize_result.success:
-        learnings.append(
-            f"Merge conflict during finalize: {finalize_result.conflict_reason}"
-        )
+    # --- Done ---
+    # Work in place - no branch merging needed
 
     return ActOutput(
         tasks_completed=tasks_completed,
@@ -1115,3 +999,10 @@ def _build_executor_prompt(
     ])
 
     return "\n".join(parts)
+
+
+# Type hint import for streaming callback
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from soda.agents.narrow import StreamingCallbackProtocol

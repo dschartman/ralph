@@ -30,7 +30,6 @@ from soda.runner import (
     _build_max_iterations_summary,
     _detect_kickstart,
     _ensure_git_has_commits,
-    _generate_milestone_branch_name,
     _print_completion_message,
 )
 from soda.decide import Decision, DecisionOutcome
@@ -414,35 +413,12 @@ class TestExtractSpecTitle:
         assert extract_spec_title(spec) == "Spaced Title"
 
 
-class TestGenerateMilestoneBranchName:
-    """Tests for _generate_milestone_branch_name function."""
-
-    def test_generates_branch_name(self):
-        """Generates a branch name with soda/milestone- prefix."""
-        branch = _generate_milestone_branch_name("# Test Spec")
-        assert branch.startswith("soda/milestone-")
-        assert len(branch) == len("soda/milestone-") + 8  # 8 char hash
-
-    def test_same_spec_same_branch(self):
-        """Same spec content generates same branch name."""
-        spec = "# My Spec\n\nContent"
-        branch1 = _generate_milestone_branch_name(spec)
-        branch2 = _generate_milestone_branch_name(spec)
-        assert branch1 == branch2
-
-    def test_different_spec_different_branch(self):
-        """Different spec content generates different branch name."""
-        branch1 = _generate_milestone_branch_name("# Spec A")
-        branch2 = _generate_milestone_branch_name("# Spec B")
-        assert branch1 != branch2
-
-
 class TestSetupMilestone:
     """Tests for setup_milestone function."""
 
     @pytest.mark.asyncio
-    async def test_setup_milestone_creates_branch_and_work_item(self):
-        """setup_milestone creates new branch and work item."""
+    async def test_setup_milestone_uses_current_branch_and_creates_work_item(self):
+        """setup_milestone uses current branch and creates work item."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create git repo with initial commit
             git = GitClient(cwd=tmpdir)
@@ -467,7 +443,9 @@ class TestSetupMilestone:
                 db=db,
             )
 
-            assert result.milestone_branch.startswith("soda/milestone-")
+            # Should use current branch (master or main, depending on git config)
+            current_branch = git.get_current_branch()
+            assert result.milestone_branch == current_branch
             assert result.root_work_item_id == "ralph-abc123"
             assert result.is_resumed is False
 
@@ -477,14 +455,12 @@ class TestSetupMilestone:
             assert call_args.kwargs["title"] == "My Feature"
 
     @pytest.mark.asyncio
-    async def test_setup_milestone_reuses_existing_on_resume(self):
-        """setup_milestone reuses existing branch and work item on resume."""
+    async def test_setup_milestone_reuses_work_item_on_resume(self):
+        """setup_milestone reuses existing work item on resume."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create git repo with milestone branch already existing
             git = GitClient(cwd=tmpdir)
             git._run_git(["init"])
             git._run_git(["commit", "--allow-empty", "-m", "Initial"])
-            git._run_git(["branch", "soda/milestone-existing"])
 
             # Mock trace client (should not be called on resume)
             trace_client = MagicMock()
@@ -492,7 +468,6 @@ class TestSetupMilestone:
             # Mock db with existing run
             db = MagicMock()
             existing_run = MagicMock()
-            existing_run.milestone_branch = "soda/milestone-existing"
             existing_run.root_work_item_id = "ralph-existing"
             db.get_run.return_value = existing_run
 
@@ -505,7 +480,9 @@ class TestSetupMilestone:
                 run_id="run-123",
             )
 
-            assert result.milestone_branch == "soda/milestone-existing"
+            # Should use current branch, reuse work item
+            current_branch = git.get_current_branch()
+            assert result.milestone_branch == current_branch
             assert result.root_work_item_id == "ralph-existing"
             assert result.is_resumed is True
 
@@ -535,18 +512,21 @@ class TestSetupMilestone:
                 db=db,
             )
 
-            # Should still return valid result with empty work item
-            assert result.milestone_branch.startswith("soda/milestone-")
+            # Should still return valid result with current branch and empty work item
+            current_branch = git.get_current_branch()
+            assert result.milestone_branch == current_branch
             assert result.root_work_item_id == ""
             assert result.is_resumed is False
 
     @pytest.mark.asyncio
-    async def test_setup_milestone_checks_out_branch(self):
-        """setup_milestone checks out the milestone branch."""
+    async def test_setup_milestone_stays_on_current_branch(self):
+        """setup_milestone stays on current branch (no checkout)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             git = GitClient(cwd=tmpdir)
             git._run_git(["init"])
             git._run_git(["commit", "--allow-empty", "-m", "Initial"])
+            # Create and checkout a feature branch
+            git._run_git(["checkout", "-b", "feature/my-work"])
 
             trace_client = MagicMock()
             trace_client.create_task.return_value = "ralph-123"
@@ -562,39 +542,10 @@ class TestSetupMilestone:
                 db=db,
             )
 
-            # Verify we're on the milestone branch
+            # Should stay on feature branch, not create/switch to milestone branch
             current_branch = git.get_current_branch()
-            assert current_branch == result.milestone_branch
-
-    @pytest.mark.asyncio
-    async def test_setup_milestone_handles_branch_conflict(self):
-        """setup_milestone handles branch name conflicts with suffix."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            git = GitClient(cwd=tmpdir)
-            git._run_git(["init"])
-            git._run_git(["commit", "--allow-empty", "-m", "Initial"])
-
-            # Pre-create a branch that would conflict
-            spec_content = "# Spec"
-            expected_branch = _generate_milestone_branch_name(spec_content)
-            git._run_git(["branch", expected_branch])
-
-            trace_client = MagicMock()
-            trace_client.create_task.return_value = "ralph-123"
-
-            db = MagicMock()
-            db.get_run.return_value = None
-
-            result = await setup_milestone(
-                project_id="test-project",
-                spec_content=spec_content,
-                git_client=git,
-                trace_client=trace_client,
-                db=db,
-            )
-
-            # Should have created a branch with -2 suffix
-            assert result.milestone_branch == f"{expected_branch}-2"
+            assert current_branch == "feature/my-work"
+            assert result.milestone_branch == "feature/my-work"
 
 
 # =============================================================================
@@ -1245,7 +1196,7 @@ class TestRunLoop:
         # First two iterations return CONTINUE, third returns DONE
         call_count = [0]
 
-        async def mock_orient(ctx):
+        async def mock_orient(ctx, **kwargs):
             call_count[0] += 1
             if call_count[0] < 3:
                 return OrientOutput(
